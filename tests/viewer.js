@@ -7,7 +7,42 @@ CSG.prototype.setColor = function(r, g, b) {
 
 // Convert from CSG solid to GL.Mesh object
 CSG.prototype.toMesh = function() {
-  var mesh = new GL.Mesh({ normals: true, colors: true });
+  var csg = this.canonicalized();
+  var mesh = new GL.Mesh({ normals: false, colors: true });
+  var vertexTag2Index = {};
+  var vertices = [];
+  var colors = [];
+  var triangles = [];
+  csg.toPolygons().map(function(polygon) {
+    var indices = polygon.vertices.map(function(vertex) {
+      var vertextag = vertex.getTag();
+      var vertexindex;
+      if(vertextag in vertexTag2Index)
+      {
+        vertexindex = vertexTag2Index[vertextag];
+      }
+      else
+      {
+        vertexindex = vertices.length;
+        vertexTag2Index[vertextag] = vertexindex;
+        vertices.push([vertex.pos.x, vertex.pos.y, vertex.pos.z]);
+        colors.push([1,2,1]);
+      }
+      return vertexindex;
+    });
+    for (var i = 2; i < indices.length; i++) {
+      triangles.push([indices[0], indices[i - 1], indices[i]]);
+    }
+  });
+  mesh.triangles = triangles;
+  mesh.vertices = vertices;
+  mesh.colors = colors;
+  mesh.computeWireframe();
+  return mesh;
+};
+
+CSG.prototype.toMeshA = function() {
+  var mesh = new GL.Mesh({ normals: false, colors: false });
   var indexer = new GL.Indexer();
   this.toPolygons().map(function(polygon) {
     var indices = polygon.vertices.map(function(vertex) {
@@ -19,12 +54,11 @@ CSG.prototype.toMesh = function() {
     }
   });
   mesh.vertices = indexer.unique.map(function(v) { return [v.pos.x, v.pos.y, v.pos.z]; });
-  mesh.normals = indexer.unique.map(function(v) { return [v.normal.x, v.normal.y, v.normal.z]; });
-  mesh.colors = indexer.unique.map(function(v) { return v.color; });
+  //mesh.normals = indexer.unique.map(function(v) { return [v.normal.x, v.normal.y, v.normal.z]; });
+  //mesh.colors = indexer.unique.map(function(v) { return [1, 1, 1]; });
   mesh.computeWireframe();
   return mesh;
 };
-
 var angleX = 20;
 var angleY = 20;
 var viewers = [];
