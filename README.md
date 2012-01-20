@@ -2,42 +2,42 @@
 
 ![](http://evanw.github.com/csg.js/image.png)
 
-Constructive Solid Geometry (CSG) is a modeling technique that uses Boolean operations like union and intersection to combine 3D solids. This library implements CSG operations on meshes elegantly and concisely using BSP trees, and is meant to serve as an easily understandable implementation of the algorithm. All edge cases involving overlapping coplanar polygons in both solids are correctly handled.
+This is a fork Evan Wallace's csg.js (https://github.com/evanw/csg.js)
+with many improvements:
 
-Example usage:
+CSG operations through BSP trees suffer from one problem: heavy fragmentation of polygons. If two CSG solids of n polygons are unified, the resulting solid may have in the order of n*n polygons, because each polygon is split by the planes of all other polygons. After a few operations the number of polygons explodes. 
 
-    var cube = CSG.cube();
-    var sphere = CSG.sphere({ radius: 1.3 });
-    var polygons = cube.subtract(sphere).toPolygons();
+This version of CSG.js solves the problem in 3 ways:
 
-# Documentation
+1. Every polygon split is recorded in a tree (CSG.PolygonTreeNode). This is a separate tree, not to be confused with the CSG tree. If a polygon is split into two parts but in the end both fragments have not been discarded by the CSG operation, we can retrieve  the original unsplit polygon from the tree, instead of the two fragments.
 
-[Detailed documentation](http://evanw.github.com/csg.js/docs/) can be automatically generated using [Docco](http://jashkenas.github.com/docco/).
+This does not completely solve the issue though: if a polygon is split multiple times the number of fragments depends on the order of subsequent splits, and we might still end up with unncessary splits: Suppose a polygon is first split into A and B, and then into A1, B1, A2, B2. Suppose B2 is discarded. We will end up with 2 polygons: A and B1. Depending on the actual split boundaries we could still have joined A and B1 into one polygon. Therefore a second approach is used as well:
 
-# Demos
+2. After CSG operations all coplanar polygon fragments are joined by a retesselating operation. See CSG.reTesselated(). Retesselation is done through a  linear sweep over the polygon surface. The sweep line passes over the y coordinates of all vertices in the polygon. Polygons are split at each sweep line, and the fragments are joined horizontally and vertically into larger polygons (making sure that we will end up with convex polygons). This still doesn't solve the problem completely: due to floating point imprecisions we may end up with small gaps between polygons, and polygons may not be exactly coplanar anymore, and as a result the retesselation algorithm may fail to join those polygons. Therefore:
 
-* [All CSG operations](http://evanw.github.com/csg.js/)
-* [Coplanar test cases](http://evanw.github.com/csg.js/coplanar.html)
-* [More test cases](http://evanw.github.com/csg.js/more.html)
+3. A canonicalization algorithm is implemented: it looks for vertices that have approximately the same coordinates (with a certain tolerance, say 1e-5) and replaces them with the same vertex. If polygons share a vertex they will actually point to the  same CSG.Vertex instance. The same is done for polygon planes. See CSG.canonicalized().
 
-# Implementation Details
+Performance improvements to the original CSG.js:
 
-All CSG operations are implemented in terms of two functions, `clipTo()` and `invert()`, which remove parts of a BSP tree inside another BSP tree and swap solid and empty space, respectively. To find the union of `a` and `b`, we want to remove everything in `a` inside `b` and everything in `b` inside `a`, then combine polygons from `a` and `b` into one solid:
+* Replaced the flip() and invert() methods by flipped() and inverted() which don't modify the source object. This allows to get rid of all clone() calls, so that multiple polygons can refer to the same CSG.Plane instance etc.
 
-    a.clipTo(b);
-    b.clipTo(a);
-    a.build(b.allPolygons());
+* The original union() used an extra invert(), clipTo(), invert() sequence just to remove the coplanar front faces from b; this is now combined in a single b.clipTo(a, true) call.    
 
-The only tricky part is handling overlapping coplanar polygons in both trees. The code above keeps both copies, but we need to keep them in one tree and remove them in the other tree. To remove them from `b` we can clip the inverse of `b` against `a`. The code for union now looks like this:
+* Detection whether a polygon is in front or in back of a plane: for each polygon we are caching the coordinates of the bounding sphere. If the bounding sphere is in front or in back of the plane we don't have to check the individual vertices anymore.
+ 
+Other additions to the original CSG.js:
 
-    a.clipTo(b);
-    b.clipTo(a);
-    b.invert();
-    b.clipTo(a);
-    b.invert();
-    a.build(b.allPolygons());
+* CSG.Vector class has been renamed into CSG.Vector3D
 
-Subtraction and intersection naturally follow from set operations. If union is `A | B`, subtraction is `A - B = ~(~A | B)` and intersection is `A & B = ~(~A | ~B)` where `~` is the complement operator.
+* Classes for 3D lines, 2D vectors, 2D lines, and methods to find the intersection of a line and a plane etc.
+
+* Transformations: CSG.transform(), CSG.translate(), CSG.rotate(), CSG.scale()
+
+* Extrusion of 2D polygons (CSG.Polygon2D.extrude())
+
+* Expanding or contracting a solid: CSG.expand() and CSG.contract(). Creates nice smooth corners.
+
+* The vertex normal has been removed since it complicates retesselation. It's not needed for solid CAD anyway.
 
 # License
 
