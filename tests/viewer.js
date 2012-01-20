@@ -1,3 +1,8 @@
+// Draw triangle lines:
+Viewer.drawLines = false;
+// Set to true so lines don't use the depth buffer
+Viewer.lineOverlay = false;
+
 // Set the color of all polygons in this solid
 CSG.prototype.setColor = function(r, g, b) {
   this.toPolygons().map(function(polygon) {
@@ -8,16 +13,24 @@ CSG.prototype.setColor = function(r, g, b) {
 // Convert from CSG solid to GL.Mesh object
 CSG.prototype.toMesh = function() {
   var csg = this.canonicalized();
-  var mesh = new GL.Mesh({ normals: false, colors: true });
+  var mesh = new GL.Mesh({ normals: true, colors: true });
   var vertexTag2Index = {};
   var vertices = [];
   var colors = [];
   var triangles = [];
-  csg.toPolygons().map(function(polygon) {
+  // set to true if we want to use interpolated vertex normals
+  // this creates nice round spheres but does not represent the shape of
+  // the actual model
+  var smoothlighting = false;   
+  var polygons = csg.toPolygons();
+  var numpolygons = polygons.length;
+  for(var polygonindex = 0; polygonindex < numpolygons; polygonindex++)
+  {
+    var polygon = polygons[polygonindex];
     var indices = polygon.vertices.map(function(vertex) {
       var vertextag = vertex.getTag();
       var vertexindex;
-      if(vertextag in vertexTag2Index)
+      if(smoothlighting && (vertextag in vertexTag2Index))
       {
         vertexindex = vertexTag2Index[vertextag];
       }
@@ -26,49 +39,35 @@ CSG.prototype.toMesh = function() {
         vertexindex = vertices.length;
         vertexTag2Index[vertextag] = vertexindex;
         vertices.push([vertex.pos.x, vertex.pos.y, vertex.pos.z]);
-        colors.push([1,2,1]);
+        colors.push([0,0,1]);
       }
       return vertexindex;
     });
     for (var i = 2; i < indices.length; i++) {
       triangles.push([indices[0], indices[i - 1], indices[i]]);
     }
-  });
+  }
   mesh.triangles = triangles;
   mesh.vertices = vertices;
   mesh.colors = colors;
   mesh.computeWireframe();
+  mesh.computeNormals();
   return mesh;
 };
 
-CSG.prototype.toMeshA = function() {
-  var mesh = new GL.Mesh({ normals: false, colors: false });
-  var indexer = new GL.Indexer();
-  this.toPolygons().map(function(polygon) {
-    var indices = polygon.vertices.map(function(vertex) {
-      vertex.color = polygon.shared || [1, 1, 1];
-      return indexer.add(vertex);
-    });
-    for (var i = 2; i < indices.length; i++) {
-      mesh.triangles.push([indices[0], indices[i - 1], indices[i]]);
-    }
-  });
-  mesh.vertices = indexer.unique.map(function(v) { return [v.pos.x, v.pos.y, v.pos.z]; });
-  //mesh.normals = indexer.unique.map(function(v) { return [v.normal.x, v.normal.y, v.normal.z]; });
-  //mesh.colors = indexer.unique.map(function(v) { return [1, 1, 1]; });
-  mesh.computeWireframe();
-  return mesh;
-};
-var angleX = 20;
-var angleY = 20;
+
 var viewers = [];
 
-// Set to true so lines don't use the depth buffer
-Viewer.lineOverlay = false;
 
 // A viewer is a WebGL canvas that lets the user view a mesh. The user can
 // tumble it around by dragging the mouse.
 function Viewer(csg, width, height, depth) {
+
+  var angleX = 0;
+  var angleY = 0;
+  var viewpointX = 0;
+  var viewpointY = 0;
+
   viewers.push(this);
 
   // Get a new WebGL canvas
@@ -110,7 +109,7 @@ function Viewer(csg, width, height, depth) {
     varying vec3 light;\
     void main() {\
       const vec3 lightDir = vec3(1.0, 2.0, 3.0) / 3.741657386773941;\
-      light = (gl_ModelViewMatrix * vec4(lightDir, 0.0)).xyz;\
+      light = lightDir;\
       color = gl_Color.rgb;\
       normal = gl_NormalMatrix * gl_Normal;\
       gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\
@@ -122,21 +121,42 @@ function Viewer(csg, width, height, depth) {
     void main() {\
       vec3 n = normalize(normal);\
       float diffuse = max(0.0, dot(light, n));\
-      float specular = pow(max(0.0, -reflect(light, n).z), 32.0) * sqrt(diffuse);\
+      float specular = pow(max(0.0, -reflect(light, n).z), 10.0) * sqrt(diffuse);\
       gl_FragColor = vec4(mix(color * (0.3 + 0.7 * diffuse), vec3(1.0), specular), 1.0);\
     }\
   ');
 
+  var _this=this;
   gl.onmousemove = function(e) {
     if (e.dragging) {
-      angleY += e.deltaX * 2;
-      angleX += e.deltaY * 2;
-      angleX = Math.max(-90, Math.min(90, angleX));
+      e.preventDefault();
+      if(e.altKey)
+      {
+        var factor = 1e-2;
+        depth *= Math.pow(2,factor * e.deltaY);
+      }
+      else if(e.shiftKey)
+      {
+        var factor = 5e-3;
+        viewpointX += factor * e.deltaX * depth; 
+        viewpointY -= factor * e.deltaY * depth; 
+      }
+      else
+      {
+        angleY += e.deltaX * 2;
+        angleX += e.deltaY * 2;
+        angleX = Math.max(-90, Math.min(90, angleX));
+      }
 
-      viewers.map(function(viewer) {
-        viewer.gl.ondraw();
-      });
+      _this.gl.ondraw();
     }
+  };
+
+  gl.onmousewheel = function(e) {
+    e.preventDefault();
+    var delta = e.wheelDelta();
+    var factor = 1e-5;
+    depth *= Math.pow(factor * delta);
   };
 
   var that = this;
@@ -145,7 +165,7 @@ function Viewer(csg, width, height, depth) {
 
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.loadIdentity();
-    gl.translate(0, 0, -depth);
+    gl.translate(viewpointX, viewpointY, -depth);
     gl.rotate(angleX, 1, 0, 0);
     gl.rotate(angleY, 0, 1, 0);
 
@@ -153,11 +173,14 @@ function Viewer(csg, width, height, depth) {
     that.lightingShader.draw(that.mesh, gl.TRIANGLES);
     if (!Viewer.lineOverlay) gl.disable(gl.POLYGON_OFFSET_FILL);
 
-    if (Viewer.lineOverlay) gl.disable(gl.DEPTH_TEST);
-    gl.enable(gl.BLEND);
-    that.blackShader.draw(that.mesh, gl.LINES);
-    gl.disable(gl.BLEND);
-    if (Viewer.lineOverlay) gl.enable(gl.DEPTH_TEST);
+    if(Viewer.drawLines)
+    {
+      if (Viewer.lineOverlay) gl.disable(gl.DEPTH_TEST);
+      gl.enable(gl.BLEND);
+      that.blackShader.draw(that.mesh, gl.LINES);
+      gl.disable(gl.BLEND);
+      if (Viewer.lineOverlay) gl.enable(gl.DEPTH_TEST);
+    }
   };
 
   gl.ondraw();

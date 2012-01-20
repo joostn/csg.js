@@ -1,66 +1,87 @@
 var _CSGDEBUG=false;
 
 /*
-Todo: lots!
+## License
 
-CSG.Polygon.prototype.expand: we should rotate the generated cylinders and spheres
-such that they join nicely with the extruded plane even if a low precision is used.
+Copyright (c) 2012 Joost Nieuwenhuijse (joost@newhouse.nl) under MIT license
 
-Add a invertedClipTo() function so we can get rid of the inverts() here:
-    b.invert();
-    b.clipTo(a);
-    b.invert();
+Based on original CSG.js: http://evanw.github.com/csg.js/
+Copyright (c) 2011 Evan Wallace under MIT license
 
--joostn
+## Overview
+
+For an overview of the CSG process see the original csg.js code:
+http://evanw.github.com/csg.js/
+
+CSG operations through BSP trees suffer from one problem: heavy fragmentation
+of polygons. If two CSG solids of n polygons are unified, the resulting solid may have
+in the order of n*n polygons, because each polygon is split by the planes of all other
+polygons. After a few operations the number of polygons explodes. 
+
+This version of CSG.js solves the problem in 3 ways:
+
+1. Every polygon split is recorded in a tree (CSG.PolygonTreeNode). This is a separate
+tree, not to be confused with the CSG tree. If a polygon is split into two parts but in
+the end both fragments have not been discarded by the CSG operation, we can retrieve 
+the original unsplit polygon from the tree, instead of the two fragments.
+
+This does not completely solve the issue though: if a polygon is split multiple times
+the number of fragments depends on the order of subsequent splits, and we might still
+end up with unncessary splits:
+Suppose a polygon is first split into A and B, and then into A1, B1, A2, B2. Suppose B2 is
+discarded. We will end up with 2 polygons: A and B1. Depending on the actual split boundaries
+we could still have joined A and B1 into one polygon. Therefore a second approach is used as well:
+
+2. After CSG operations all coplanar polygon fragments are joined by a retesselating
+operation. See CSG.reTesselated(). Retesselation is done through a 
+linear sweep over the polygon surface. The sweep line passes over the y coordinates
+of all vertices in the polygon. Polygons are split at each sweep line, and the fragments
+are joined horizontally and vertically into larger polygons (making sure that we
+will end up with convex polygons).
+This still doesn't solve the problem completely: due to floating point imprecisions
+we may end up with small gaps between polygons, and polygons may not be exactly coplanar
+anymore, and as a result the retesselation algorithm may fail to join those polygons.
+Therefore:
+
+3. A canonicalization algorithm is implemented: it looks for vertices that have
+approximately the same coordinates (with a certain tolerance, say 1e-5) and replaces
+them with the same vertex. If polygons share a vertex they will actually point to the 
+same CSG.Vertex instance. The same is done for polygon planes. See CSG.canonicalized().
+
+
+Performance improvements to the original CSG.js:
+
+Replaced the flip() and invert() methods by flipped() and inverted() which don't
+modify the source object. This allows to get rid of all clone() calls, so that
+multiple polygons can refer to the same CSG.Plane instance etc.
+
+The original union() used an extra invert(), clipTo(), invert() sequence just to remove the 
+coplanar front faces from b; this is now combined in a single b.clipTo(a, true) call.    
+
+Detection whether a polygon is in front or in back of a plane: for each polygon
+we are caching the coordinates of the bounding sphere. If the bounding sphere is
+in front or in back of the plane we don't have to check the individual vertices
+anymore.
+ 
+
+Other additions to the original CSG.js:
+
+CSG.Vector class has been renamed into CSG.Vector3D
+
+Classes for 3D lines, 2D vectors, 2D lines, and methods to find the intersection of 
+a line and a plane etc.
+
+Transformations: CSG.transform(), CSG.translate(), CSG.rotate(), CSG.scale()
+
+Extrusion of 2D polygons (CSG.Polygon2D.extrude())
+
+Expanding or contracting a solid: CSG.expand() and CSG.contract(). Creates nice
+smooth corners.
+
+The vertex normal has been removed since it complicates retesselation. It's not needed
+for solid CAD anyway.
+
 */
-
-
-
-// Constructive Solid Geometry (CSG) is a modeling technique that uses Boolean
-// operations like union and intersection to combine 3D solids. This library
-// implements CSG operations on meshes elegantly and concisely using BSP trees,
-// and is meant to serve as an easily understandable implementation of the
-// algorithm. All edge cases involving overlapping coplanar polygons in both
-// solids are correctly handled.
-// 
-// Example usage:
-// 
-//     var cube = CSG.cube();
-//     var sphere = CSG.sphere({ radius: 1.3 });
-//     var polygons = cube.subtract(sphere).toPolygons();
-// 
-// ## Implementation Details
-// 
-// All CSG operations are implemented in terms of two functions, `clipTo()` and
-// `invert()`, which remove parts of a BSP tree inside another BSP tree and swap
-// solid and empty space, respectively. To find the union of `a` and `b`, we
-// want to remove everything in `a` inside `b` and everything in `b` inside `a`,
-// then combine polygons from `a` and `b` into one solid:
-// 
-//     a.clipTo(b);
-//     b.clipTo(a);
-//     a.build(b.allPolygons());
-// 
-// The only tricky part is handling overlapping coplanar polygons in both trees.
-// The code above keeps both copies, but we need to keep them in one tree and
-// remove them in the other tree. To remove them from `b` we can clip the
-// inverse of `b` against `a`. The code for union now looks like this:
-// 
-//     a.clipTo(b);
-//     b.clipTo(a);
-//     b.invert();
-//     b.clipTo(a);
-//     b.invert();
-//     a.build(b.allPolygons());
-// 
-// Subtraction and intersection naturally follow from set operations. If
-// union is `A | B`, subtraction is `A - B = ~(~A | B)` and intersection is
-// `A & B = ~(~A | ~B)` where `~` is the complement operator.
-// 
-// ## License
-// 
-// Copyright (c) 2011 Evan Wallace (http://madebyevan.com/), under the MIT license.
-// Parts Copyright (c) 2012 Joost Nieuwenhuijse (joost@newhouse.nl) under the MIT license.
 
 // # class CSG
 
@@ -109,7 +130,7 @@ CSG.prototype = {
     var newpolygons = a.allPolygons().concat(b.allPolygons());
     var csg = CSG.fromPolygons(newpolygons);
     if(canonicalize) csg = csg.canonicalized();
-    if(retesselate) csg = csg.reTesselate();
+    if(retesselate) csg = csg.reTesselated();              
     return csg;
   },
 
@@ -141,7 +162,7 @@ CSG.prototype = {
     a.invert();
     var csg = CSG.fromPolygons(a.allPolygons());
     if(canonicalize) csg = csg.canonicalized();
-    if(retesselate) csg = csg.reTesselate();
+    if(retesselate) csg = csg.reTesselated();
     return csg;
   },
 
@@ -175,7 +196,7 @@ CSG.prototype = {
     a.invert();
     var csg = CSG.fromPolygons(a.allPolygons());
     if(canonicalize) csg = csg.canonicalized();
-    if(retesselate) csg = csg.reTesselate();
+    if(retesselate) csg = csg.reTesselated();
     return csg;
   },
 
@@ -224,12 +245,127 @@ CSG.prototype = {
     this.polygons.map(function(p){ result += p.toString(); });
     return result;
   },
+  
+  // Expand the solid
+  // resolution: number of points per 360 degree for the rounded corners
+  expand: function(radius, resolution) {
+    var result=this;
+    this.polygons.map(function(p) {
+      var expanded=p.expand(radius, resolution);
+      result=result.unionSub(expanded, true, false);
+    });
+    result = result.canonicalized();
+    return result;
+  },
+  
+  // Contract the solid
+  // resolution: number of points per 360 degree for the rounded corners
+  contract: function(radius, resolution) {
+    var result=this;
+    this.polygons.map(function(p) {
+      var expanded=p.expand(radius, resolution);
+      result=result.subtract(expanded);
+    });
+    return result;
+  },
 
+  canonicalized: function () {
+    if(this.isCanonicalized)
+    {
+      return this;
+    }
+    else
+    {
+      var factory = new CSG.fuzzyCSGFactory();
+      var result = factory.getCSG(this);
+      result.isCanonicalized = true;
+      return result;
+    }
+  },
+  
+  reTesselated: function () {
+    if(this.isRetesselated)
+    {
+      return this;
+    }
+    else
+    {
+      var csg=this; //.canonicalized();
+      var polygonsPerPlane = {};
+      csg.polygons.map(function(polygon) {
+        var planetag = polygon.plane.getTag();
+        if(! (planetag in polygonsPerPlane) )
+        {
+          polygonsPerPlane[planetag] = [];
+        }
+        polygonsPerPlane[planetag].push(polygon);
+      });
+      var destpolygons = [];
+      for(planetag in polygonsPerPlane)
+      {
+        var sourcepolygons = polygonsPerPlane[planetag];
+        if(sourcepolygons.length < 2)
+        {
+          destpolygons = destpolygons.concat(sourcepolygons);
+        }
+        else
+        {
+          var retesselayedpolygons = [];
+          CSG.reTesselateCoplanarPolygons(sourcepolygons, retesselayedpolygons);
+          destpolygons = destpolygons.concat(retesselayedpolygons);
+        }
+      }
+      var result = CSG.fromPolygons(destpolygons);
+      result.isRetesselated = true;
+      return result;
+    }
+  },
 };
 
-// Construct an axis-aligned solid cuboid. Optional parameters are `center` and
-// `radius`, which default to `[0, 0, 0]` and `[1, 1, 1]`. The radius can be
-// specified using a single number or a list of three numbers, one for each axis.
+// Parse an option from the options object
+// If the option is not present, return the default value
+CSG.parseOption = function(options, optionname, defaultvalue) {
+  var result = defaultvalue;
+  if(options)
+  {
+    if(optionname in options)
+    {
+      result = options[optionname];
+    }
+  }
+  return result;
+};
+
+// Parse an option and force into a CSG.Vector3D. If a scalar is passed it is converted
+// into a vector with equal x,y,z
+CSG.parseOptionAs3DVector = function(options, optionname, defaultvalue) {
+  var result = CSG.parseOption(options, optionname, defaultvalue);
+  result = new CSG.Vector3D(result);
+  return result;
+};
+
+CSG.parseOptionAsFloat = function(options, optionname, defaultvalue) {
+  var result = CSG.parseOption(options, optionname, defaultvalue);
+  if(typeof(result) == "string")
+  {
+    result = Number(result);
+  }
+  else if(typeof(result) != "number")
+  {
+    throw new Error("Parameter "+optionname+" should be a number");
+  }
+  return result;
+};
+
+CSG.parseOptionAsInt = function(options, optionname, defaultvalue) {
+  var result = CSG.parseOption(options, optionname, defaultvalue);
+  return Number(Math.floor(result));
+};
+
+// Construct an axis-aligned solid cuboid.
+// Parameters:
+//   center: center of cube (default [0,0,0])
+//   radius: radius of cube (default [1,1,1]), can be specified as scalar or as 3D vector
 // 
 // Example code:
 // 
@@ -238,10 +374,8 @@ CSG.prototype = {
 //       radius: 1
 //     });
 CSG.cube = function(options) {
-  options = options || {};
-  var c = new CSG.Vector(options.center || [0, 0, 0]);
-  var r = !options.radius ? [1, 1, 1] : options.radius.length ?
-           options.radius : [options.radius, options.radius, options.radius];
+  var c = CSG.parseOptionAs3DVector(options, "center", [0,0,0]);
+  var r = CSG.parseOptionAs3DVector(options, "radius", [1,1,1]);
   return CSG.fromPolygons([
     [[0, 4, 6, 2], [-1, 0, 0]],
     [[1, 3, 7, 5], [+1, 0, 0]],
@@ -250,13 +384,13 @@ CSG.cube = function(options) {
     [[0, 2, 3, 1], [0, 0, -1]],
     [[4, 5, 7, 6], [0, 0, +1]]
   ].map(function(info) {
-    var normal = new CSG.Vector(info[1]);
+    var normal = new CSG.Vector3D(info[1]);
     //var plane = new CSG.Plane(normal, 1);
     var vertices = info[0].map(function(i) {
-      var pos = new CSG.Vector(
-        c.x + r[0] * (2 * !!(i & 1) - 1),
-        c.y + r[1] * (2 * !!(i & 2) - 1),
-        c.z + r[2] * (2 * !!(i & 4) - 1)
+      var pos = new CSG.Vector3D(
+        c.x + r.x * (2 * !!(i & 1) - 1),
+        c.y + r.y * (2 * !!(i & 2) - 1),
+        c.z + r.z * (2 * !!(i & 4) - 1)
       );
       return new CSG.Vertex(pos);
     });
@@ -264,52 +398,84 @@ CSG.cube = function(options) {
   }));
 };
 
-// Construct a solid sphere. Optional parameters are `center`, `radius`,
-// `slices`, and `stacks`, which default to `[0, 0, 0]`, `1`, `16`, and `8`.
-// The `slices` and `stacks` parameters control the tessellation along the
-// longitude and latitude directions.
+// Construct a solid sphere
+//
+// Parameters:
+//   center: center of sphere (default [0,0,0])
+//   radius: radius of sphere (default 1), must be a scalar
+//   resolution: determines the number of polygons per 360 degree revolution (default 12)
 // 
 // Example usage:
 // 
 //     var sphere = CSG.sphere({
 //       center: [0, 0, 0],
-//       radius: 1,
-//       slices: 16,
-//       stacks: 8
+//       radius: 2,
+//       resolution: 32,
 //     });
 CSG.sphere = function(options) {
   options = options || {};
-  var c = new CSG.Vector(options.center || [0, 0, 0]);
-  var r = options.radius || 1;
-  var slices = options.slices || 16;
-  var stacks = options.stacks || 8;
-  var polygons = [], vertices;
-  function vertex(theta, phi) {
-    theta *= Math.PI * 2;
-    phi *= Math.PI;
-    var dir = new CSG.Vector(
-      Math.cos(theta) * Math.sin(phi),
-      Math.cos(phi),
-      Math.sin(theta) * Math.sin(phi)
-    );
-    vertices.push(new CSG.Vertex(c.plus(dir.times(r))));
-  }
-  for (var i = 0; i < slices; i++) {
-    for (var j = 0; j < stacks; j++) {
-      vertices = [];
-      vertex(i / slices, j / stacks);
-      if (j > 0) vertex((i + 1) / slices, j / stacks);
-      if (j < stacks - 1) vertex((i + 1) / slices, (j + 1) / stacks);
-      vertex(i / slices, (j + 1) / stacks);
-      polygons.push(new CSG.Polygon(vertices));
+  var center = CSG.parseOptionAs3DVector(options, "center", [0,0,0]);
+  var radius = CSG.parseOptionAsFloat(options, "radius", 1);
+  var resolution = CSG.parseOptionAsInt(options, "resolution", 12);
+  if(resolution < 4) resolution = 4;
+  var qresolution = Math.round(resolution / 4);
+  var xvector = new CSG.Vector3D([1,0,0]).times(radius);
+  var yvector = new CSG.Vector3D([0,-1,0]).times(radius);
+  var zvector = new CSG.Vector3D([0,0,1]).times(radius);
+  var prevcylinderpoint;
+  var polygons = [];
+  for(var slice1 = 0; slice1 <= resolution; slice1++)
+  {
+    var angle = Math.PI * 2.0 * slice1 / resolution;
+    var cylinderpoint = xvector.times(Math.cos(angle)).plus(yvector.times(Math.sin(angle)));
+    if(slice1 > 0)
+    {
+      // cylinder vertices:
+      var vertices = [];
+      var prevcospitch, prevsinpitch;
+      for(var slice2 = 0; slice2 <= qresolution; slice2++)
+      {
+        var pitch = 0.5 * Math.PI * slice2 / qresolution;
+        var cospitch = Math.cos(pitch);
+        var sinpitch = Math.sin(pitch);
+        if(slice2 > 0)
+        {
+          vertices = [];
+          vertices.push(new CSG.Vertex(center.plus(prevcylinderpoint.times(prevcospitch).minus(zvector.times(prevsinpitch)))));
+          vertices.push(new CSG.Vertex(center.plus(cylinderpoint.times(prevcospitch).minus(zvector.times(prevsinpitch)))));
+          if(slice2 < qresolution)
+          {
+            vertices.push(new CSG.Vertex(center.plus(cylinderpoint.times(cospitch).minus(zvector.times(sinpitch)))));
+          }
+          vertices.push(new CSG.Vertex(center.plus(prevcylinderpoint.times(cospitch).minus(zvector.times(sinpitch)))));
+          polygons.push(new CSG.Polygon(vertices));
+          vertices = [];
+          vertices.push(new CSG.Vertex(center.plus(prevcylinderpoint.times(prevcospitch).plus(zvector.times(prevsinpitch)))));
+          vertices.push(new CSG.Vertex(center.plus(cylinderpoint.times(prevcospitch).plus(zvector.times(prevsinpitch)))));
+          if(slice2 < qresolution)
+          {
+            vertices.push(new CSG.Vertex(center.plus(cylinderpoint.times(cospitch).plus(zvector.times(sinpitch)))));
+          }
+          vertices.push(new CSG.Vertex(center.plus(prevcylinderpoint.times(cospitch).plus(zvector.times(sinpitch)))));
+          vertices.reverse();
+          polygons.push(new CSG.Polygon(vertices));
+        }
+        prevcospitch = cospitch; 
+        prevsinpitch = sinpitch; 
+      }
     }
+    prevcylinderpoint = cylinderpoint;
   }
-  return CSG.fromPolygons(polygons);
+  return CSG.fromPolygons(polygons);  
 };
 
-// Construct a solid cylinder. Optional parameters are `start`, `end`,
-// `radius`, and `slices`, which default to `[0, -1, 0]`, `[0, 1, 0]`, `1`, and
-// `16`. The `slices` parameter controls the tessellation.
+// Construct a solid cylinder.
+//
+// Parameters:
+//   start: start point of cylinder (default [0, -1, 0])
+//   end: end point of cylinder (default [0, 1, 0])
+//   radius: radius of cylinder (default 1), must be a scalar
+//   resolution: determines the number of polygons per 360 degree revolution (default 12)
 // 
 // Example usage:
 // 
@@ -317,17 +483,16 @@ CSG.sphere = function(options) {
 //       start: [0, -1, 0],
 //       end: [0, 1, 0],
 //       radius: 1,
-//       slices: 16
+//       resolution: 16
 //     });
 CSG.cylinder = function(options) {
-  options = options || {};
-  var s = new CSG.Vector(options.start || [0, -1, 0]);
-  var e = new CSG.Vector(options.end || [0, 1, 0]);
+  var s = CSG.parseOptionAs3DVector(options, "start", [0, -1, 0]);
+  var e = CSG.parseOptionAs3DVector(options, "end", [0, 1, 0]);
+  var r = CSG.parseOptionAsFloat(options, "radius", 1);
+  var slices = CSG.parseOptionAsFloat(options, "resolution", 12);
   var ray = e.minus(s);
-  var r = options.radius || 1;
-  var slices = options.slices || 16;
   var axisZ = ray.unit(), isY = (Math.abs(axisZ.y) > 0.5);
-  var axisX = new CSG.Vector(isY, !isY, 0).cross(axisZ).unit();
+  var axisX = new CSG.Vector3D(isY, !isY, 0).cross(axisZ).unit();
   var axisY = axisX.cross(axisZ).unit();
   var start = new CSG.Vertex(s);
   var end = new CSG.Vertex(e);
@@ -348,55 +513,244 @@ CSG.cylinder = function(options) {
   return CSG.fromPolygons(polygons);
 };
 
-// # class Vector
+// Like a cylinder, but with rounded ends instead of flat
+//
+// Parameters:
+//   start: start point of cylinder (default [0, -1, 0])
+//   end: end point of cylinder (default [0, 1, 0])
+//   radius: radius of cylinder (default 1), must be a scalar
+//   resolution: determines the number of polygons per 360 degree revolution (default 12)
+//   normal: a vector determining the starting angle for tesselation. Should be non-parallel to start.minus(end)
+// 
+// Example usage:
+// 
+//     var cylinder = CSG.roundedCylinder({
+//       start: [0, -1, 0],
+//       end: [0, 1, 0],
+//       radius: 1,
+//       resolution: 16
+//     });
+CSG.roundedCylinder = function(options) {
+  var p1 = CSG.parseOptionAs3DVector(options, "start", [0, -1, 0]);
+  var p2 = CSG.parseOptionAs3DVector(options, "end", [0, 1, 0]);
+  var radius = CSG.parseOptionAsFloat(options, "radius", 1);
+  var direction = p2.minus(p1);
+  var defaultnormal;
+  if(Math.abs(direction.x) > Math.abs(direction.y))
+  {
+    defaultnormal = new CSG.Vector3D(0,1,0);
+  }
+  else
+  {
+    defaultnormal = new CSG.Vector3D(1,0,0);
+  }
+  var normal = CSG.parseOptionAs3DVector(options, "normal", defaultnormal);
+  var resolution = CSG.parseOptionAsFloat(options, "resolution", 12);
+  if(resolution < 4) resolution = 4;
+  var polygons = [];
+  var qresolution = Math.floor(0.25*resolution);
+  var length = direction.length();
+  if(length < 1e-10)
+  {
+    return CSG.sphere({center: p1, radius: radius, resolution: resolution});
+  }
+  var zvector = direction.unit().times(radius);
+  var xvector = zvector.cross(normal).unit().times(radius);
+  var yvector = xvector.cross(zvector).unit().times(radius);
+  var prevcylinderpoint;
+  for(var slice1 = 0; slice1 <= resolution; slice1++)
+  {
+    var angle = Math.PI * 2.0 * slice1 / resolution;
+    var cylinderpoint = xvector.times(Math.cos(angle)).plus(yvector.times(Math.sin(angle)));
+    if(slice1 > 0)
+    {
+      // cylinder vertices:
+      var vertices = [];
+      vertices.push(new CSG.Vertex(p1.plus(cylinderpoint)));
+      vertices.push(new CSG.Vertex(p1.plus(prevcylinderpoint)));
+      vertices.push(new CSG.Vertex(p2.plus(prevcylinderpoint)));
+      vertices.push(new CSG.Vertex(p2.plus(cylinderpoint)));
+      polygons.push(new CSG.Polygon(vertices));
+      var prevcospitch, prevsinpitch;
+      for(var slice2 = 0; slice2 <= qresolution; slice2++)
+      {
+        var pitch = 0.5 * Math.PI * slice2 / qresolution;
+        var cospitch = Math.cos(pitch);
+        var sinpitch = Math.sin(pitch);
+        if(slice2 > 0)
+        {
+          vertices = [];
+          vertices.push(new CSG.Vertex(p1.plus(prevcylinderpoint.times(prevcospitch).minus(zvector.times(prevsinpitch)))));
+          vertices.push(new CSG.Vertex(p1.plus(cylinderpoint.times(prevcospitch).minus(zvector.times(prevsinpitch)))));
+          if(slice2 < qresolution)
+          {
+            vertices.push(new CSG.Vertex(p1.plus(cylinderpoint.times(cospitch).minus(zvector.times(sinpitch)))));
+          }
+          vertices.push(new CSG.Vertex(p1.plus(prevcylinderpoint.times(cospitch).minus(zvector.times(sinpitch)))));
+          polygons.push(new CSG.Polygon(vertices));
+          vertices = [];
+          vertices.push(new CSG.Vertex(p2.plus(prevcylinderpoint.times(prevcospitch).plus(zvector.times(prevsinpitch)))));
+          vertices.push(new CSG.Vertex(p2.plus(cylinderpoint.times(prevcospitch).plus(zvector.times(prevsinpitch)))));
+          if(slice2 < qresolution)
+          {
+            vertices.push(new CSG.Vertex(p2.plus(cylinderpoint.times(cospitch).plus(zvector.times(sinpitch)))));
+          }
+          vertices.push(new CSG.Vertex(p2.plus(prevcylinderpoint.times(cospitch).plus(zvector.times(sinpitch)))));
+          vertices.reverse();
+          polygons.push(new CSG.Polygon(vertices));
+        }
+        prevcospitch = cospitch; 
+        prevsinpitch = sinpitch; 
+      }
+    }
+    prevcylinderpoint = cylinderpoint;
+  }
+  return CSG.fromPolygons(polygons);
+};
+
+// Construct an axis-aligned solid rounded cuboid.
+// Parameters:
+//   center: center of cube (default [0,0,0])
+//   radius: radius of cube (default [1,1,1]), can be specified as scalar or as 3D vector
+//   roundradius: radius of rounded corners (default 0.2), must be a scalar
+//   resolution: determines the number of polygons per 360 degree revolution (default 8)
+// 
+// Example code:
+// 
+//     var cube = CSG.roundedCube({
+//       center: [0, 0, 0],
+//       radius: 1,
+//       roundradius: 0.2,
+//       resolution: 8,
+//     });
+CSG.roundedCube = function(options) {
+  var center = CSG.parseOptionAs3DVector(options, "center", [0,0,0]);
+  var cuberadius = CSG.parseOptionAs3DVector(options, "radius", [1,1,1]);
+  var resolution = CSG.parseOptionAsFloat(options, "resolution", 8);
+  if(resolution < 4) resolution = 4;
+  var roundradius = CSG.parseOptionAsFloat(options, "roundradius", 0.2);
+  var innercuberadius=cuberadius.clone();
+  innercuberadius.x -= roundradius;
+  innercuberadius.y -= roundradius;
+  innercuberadius.z -= roundradius;
+  var result = CSG.cube({center: center, radius: [cuberadius.x, innercuberadius.y, innercuberadius.z]});
+  result = result.unionSub( CSG.cube({center: center, radius: [innercuberadius.x, cuberadius.y, innercuberadius.z]}),false,false);
+  result = result.unionSub( CSG.cube({center: center, radius: [innercuberadius.x, innercuberadius.y, cuberadius.z]}),false,false);
+  for(var level=0; level < 2; level++)
+  {
+    var z = innercuberadius.z;
+    if(level == 1) z = -z;
+    var p1 = new CSG.Vector3D(innercuberadius.x, innercuberadius.y, z).plus(center);
+    var p2 = new CSG.Vector3D(innercuberadius.x, -innercuberadius.y, z).plus(center);
+    var p3 = new CSG.Vector3D(-innercuberadius.x, -innercuberadius.y, z).plus(center);
+    var p4 = new CSG.Vector3D(-innercuberadius.x, innercuberadius.y, z).plus(center);
+    var sphere = CSG.sphere({center: p1, radius: roundradius, resolution: resolution});
+    result = result.unionSub(sphere,false,false);
+    sphere = CSG.sphere({center: p2, radius: roundradius, resolution: resolution});
+    result = result.unionSub(sphere,false,false);
+    sphere = CSG.sphere({center: p3, radius: roundradius, resolution: resolution});
+    result = result.unionSub(sphere,false,false);
+    sphere = CSG.sphere({center: p4, radius: roundradius, resolution: resolution});
+    result = result.unionSub(sphere,true,true);
+    var cylinder = CSG.cylinder({start:p1, end: p2, radius: roundradius, resolution: resolution});
+    result = result.unionSub(cylinder,false,false);
+    cylinder = CSG.cylinder({start:p2, end: p3, radius: roundradius, resolution: resolution});
+    result = result.unionSub(cylinder,false,false);
+    cylinder = CSG.cylinder({start:p3, end: p4, radius: roundradius, resolution: resolution});
+    result = result.unionSub(cylinder,false,false);
+    cylinder = CSG.cylinder({start:p4, end: p1, radius: roundradius, resolution: resolution});
+    result = result.unionSub(cylinder,false,false);
+    if(level == 0) {
+      var d = new CSG.Vector3D(0, 0, -2*z);
+      cylinder = CSG.cylinder({start:p1, end: p1.plus(d), radius: roundradius, resolution: resolution});
+      result = result.unionSub(cylinder);
+      cylinder = CSG.cylinder({start:p2, end: p2.plus(d), radius: roundradius, resolution: resolution});
+      result = result.unionSub(cylinder);
+      cylinder = CSG.cylinder({start:p3, end: p3.plus(d), radius: roundradius, resolution: resolution});
+      result = result.unionSub(cylinder);
+      cylinder = CSG.cylinder({start:p4, end: p4.plus(d), radius: roundradius, resolution: resolution});
+      result = result.unionSub(cylinder,true,true);
+    }
+  }
+  return result;
+}
+
+
+
+// # class Vector3D
 
 // Represents a 3D vector.
 // 
 // Example usage:
 // 
-//     new CSG.Vector(1, 2, 3);
-//     new CSG.Vector([1, 2, 3]);
-//     new CSG.Vector({ x: 1, y: 2, z: 3 });
+//     new CSG.Vector3D(1, 2, 3);
+//     new CSG.Vector3D([1, 2, 3]);
+//     new CSG.Vector3D({ x: 1, y: 2, z: 3 });
 
-CSG.Vector = function(x, y, z) {
-  if (arguments.length == 3) {
-    this.x = x;
-    this.y = y;
-    this.z = z;
-  } else if ('x' in x) {
-    this.x = x.x;
-    this.y = x.y;
-    this.z = x.z;
-  } else {
-    this.x = x[0];
-    this.y = x[1];
-    this.z = x[2];
+CSG.Vector3D = function(x, y, z) {
+  var ok = true;
+  if (arguments.length == 1)
+  {
+    if(typeof(x) == "object")
+    {
+      if(x instanceof Array)
+      {
+        this.x = x[0];
+        this.y = x[1];
+        this.z = x[2];
+      }  
+      else if( ('x' in x) && ('y' in x) && ('z' in x) )
+      {
+        this.x = x.x;
+        this.y = x.y;
+        this.z = x.z;
+      }
+      else ok = false;
+    }
+    else
+    {
+      var v = Number(x);
+      this.x = v;
+      this.y = v;
+      this.z = v;
+    }
+  }
+  else if (arguments.length == 3)
+  {
+    this.x = Number(x);
+    this.y = Number(y);
+    this.z = Number(z);
+  }
+  else ok = false;
+  if(!ok)
+  {
+    throw new Error("wrong arguments");
   }
 };
 
-CSG.Vector.prototype = {
+CSG.Vector3D.prototype = {
   clone: function() {
-    return new CSG.Vector(this.x, this.y, this.z);
+    return new CSG.Vector3D(this.x, this.y, this.z);
   },
 
   negated: function() {
-    return new CSG.Vector(-this.x, -this.y, -this.z);
+    return new CSG.Vector3D(-this.x, -this.y, -this.z);
   },
 
   plus: function(a) {
-    return new CSG.Vector(this.x + a.x, this.y + a.y, this.z + a.z);
+    return new CSG.Vector3D(this.x + a.x, this.y + a.y, this.z + a.z);
   },
 
   minus: function(a) {
-    return new CSG.Vector(this.x - a.x, this.y - a.y, this.z - a.z);
+    return new CSG.Vector3D(this.x - a.x, this.y - a.y, this.z - a.z);
   },
 
   times: function(a) {
-    return new CSG.Vector(this.x * a, this.y * a, this.z * a);
+    return new CSG.Vector3D(this.x * a, this.y * a, this.z * a);
   },
 
   dividedBy: function(a) {
-    return new CSG.Vector(this.x / a, this.y / a, this.z / a);
+    return new CSG.Vector3D(this.x / a, this.y / a, this.z / a);
   },
 
   dot: function(a) {
@@ -420,7 +774,7 @@ CSG.Vector.prototype = {
   },
 
   cross: function(a) {
-    return new CSG.Vector(
+    return new CSG.Vector3D(
       this.y * a.z - this.z * a.y,
       this.z * a.x - this.x * a.z,
       this.x * a.y - this.y * a.x
@@ -440,7 +794,7 @@ CSG.Vector.prototype = {
   },
   
   // Right multiply by a 4x4 matrix (the vector is interpreted as a row vector)
-  // Returns a new CSG.Vector
+  // Returns a new CSG.Vector3D
   multiply4x4: function(matrix4x4) {
     return matrix4x4.rightMultiply1x3Vector(this);
   },
@@ -545,7 +899,7 @@ CSG.Plane.prototype = {
   },
   
   transform: function(matrix4x4) {
-    var origin = new CSG.Vector(0,0,0);
+    var origin = new CSG.Vector3D(0,0,0);
     var pointOnPlane = this.normal.times(this.w);
     var neworigin = origin.multiply4x4(matrix4x4);
     var neworiginPlusNormal = this.normal.multiply4x4(matrix4x4);
@@ -782,8 +1136,70 @@ CSG.Polygon.prototype = {
       throw new Error("Not convex!");
     }
   },
-
-  // returns an array with a CSG.Vector (center point) and a radius
+  
+  // Extrude a polygon into the direction offsetvector
+  // Returns a CSG object
+  extrude: function(offsetvector) {
+    var newpolygons = [];
+  
+    var polygon1=this;
+    var direction = polygon1.plane.normal.dot(offsetvector);
+    if(direction > 0)
+    {
+      polygon1 = polygon1.flipped();
+    }
+    newpolygons.push(polygon1);
+    var polygon2=polygon1.translate(offsetvector);
+    var numvertices=this.vertices.length;
+    for(var i=0; i < numvertices; i++)
+    {
+      var sidefacepoints = [];
+      var nexti = (i < (numvertices-1))? i+1:0;
+      sidefacepoints.push(polygon1.vertices[i].pos);
+      sidefacepoints.push(polygon2.vertices[i].pos);
+      sidefacepoints.push(polygon2.vertices[nexti].pos);
+      sidefacepoints.push(polygon1.vertices[nexti].pos);
+      var sidefacepolygon=CSG.Polygon.createFromPoints(sidefacepoints);
+      newpolygons.push(sidefacepolygon);
+    }
+    polygon2 = polygon2.flipped();
+    newpolygons.push(polygon2);
+    return CSG.fromPolygons(newpolygons);
+  },
+  
+  translate: function(offset) {
+    return this.transform(CSG.Matrix4x4.translation(offset));
+  },
+  
+  // Expand the polygon with a certain radius
+  // This extrudes the face of the polygon and adds rounded corners 
+  // Returns a CSG object (not a polygon anymore!)
+  // resolution: number of points per 360 degree for the rounded corners
+  expand: function(radius, resolution) {
+    if( (!resolution) || (resolution < 4) ) resolution = 4;
+    resolution = 4 * Math.floor(resolution / 4);
+  
+    var result=new CSG();
+    
+    // expand each side of the polygon. The expansion of a line is a roundedCylinder:
+    var numvertices=this.vertices.length;
+    for(var i=0; i < numvertices; i++)
+    {
+      var previ = (i == 0) ? (numvertices-1):i-1;
+      var p1 = this.vertices[previ].pos;
+      var p2 = this.vertices[i].pos;
+  
+      var roundedCylinder = CSG.roundedCylinder({start: p1, end: p2, normal: this.plane.normal, radius: radius, resolution: resolution});
+      result = result.unionSub(roundedCylinder, false, false);
+    }
+    var extrudevector=this.plane.normal.unit().times(2*radius);
+    var translatedpolygon = this.translate(extrudevector.times(-0.5));
+    var extrudedface = translatedpolygon.extrude(extrudevector);  
+    result=result.unionSub(extrudedface, true, false);
+    return result;
+  },
+  
+  // returns an array with a CSG.Vector3D (center point) and a radius
   boundingSphere: function() {
     if(!this.cachedBoundingSphere)
     {
@@ -796,7 +1212,7 @@ CSG.Polygon.prototype = {
     return this.cachedBoundingSphere;
   },
 
-  // returns an array of two CSG.Vectors (minimum coordinates and maximum coordinates)
+  // returns an array of two CSG.Vector3Ds (minimum coordinates and maximum coordinates)
   boundingBox: function() {
     if(!this.cachedBoundingBox)
     {
@@ -805,8 +1221,8 @@ CSG.Polygon.prototype = {
       var numvertices = vertices.length;
       if(numvertices == 0)
       {
-        minpoint=new CSG.Vector(0,0,0);
-        maxpoint=new CSG.Vector(0,0,0);
+        minpoint=new CSG.Vector3D(0,0,0);
+        maxpoint=new CSG.Vector3D(0,0,0);
       }
       else
       {
@@ -890,33 +1306,13 @@ CSG.Polygon.verticesConvex = function(vertices, planenormal) {
   return true;
 };
 
-CSG.Polygon.verticesStrictlyConvex = function(vertices, planenormal) {
-  var numvertices = vertices.length;
-  if(numvertices > 2)
-  {
-    var prevprevpos=vertices[numvertices-2].pos;
-    var prevpos=vertices[numvertices-1].pos;
-    for(var i=0; i < numvertices; i++)
-    {
-      var pos=vertices[i].pos;
-      if(!CSG.Polygon.isStrictlyConvexPoint(prevprevpos, prevpos, pos, planenormal))
-      {
-        return false;
-      }
-      prevprevpos=prevpos;
-      prevpos=pos;
-    }
-  }
-  return true;
-};
-
 // Create a polygon from the given points
 CSG.Polygon.createFromPoints = function(points, shared, plane) {
   var normal;
   if(arguments.length < 3)
   {
     // initially set a dummy vertex normal:
-    normal = new CSG.Vector(0, 0, 0);
+    normal = new CSG.Vector3D(0, 0, 0);
   }
   else
   {
@@ -924,7 +1320,7 @@ CSG.Polygon.createFromPoints = function(points, shared, plane) {
   }
   var vertices = [];
   points.map( function(p) {
-    var vec = new CSG.Vector(p);
+    var vec = new CSG.Vector3D(p);
     var vertex = new CSG.Vertex(vec);
     vertices.push(vertex); 
   });            
@@ -941,7 +1337,7 @@ CSG.Polygon.createFromPoints = function(points, shared, plane) {
 };
 
 // calculate whether three points form a convex corner 
-//  prevpoint, point, nextpoint: the 3 coordinates (CSG.Vector instances)
+//  prevpoint, point, nextpoint: the 3 coordinates (CSG.Vector3D instances)
 //  normal: the normal vector of the plane
 CSG.Polygon.isConvexPoint = function(prevpoint, point, nextpoint, normal) {
   var crossproduct=point.minus(prevpoint).cross(nextpoint.minus(point));
@@ -1382,7 +1778,7 @@ CSG.Matrix4x4.prototype = {
     return new CSG.Matrix4x4(elements);
   },
   
-  // Multiply a CSG.Vector (interpreted as 1 row, 3 column) by this matrix 
+  // Multiply a CSG.Vector3D (interpreted as 1 row, 3 column) by this matrix 
   // Fourth element is taken as 1
   rightMultiply1x3Vector: function(v) {
     var v0 = v.x;
@@ -1401,7 +1797,7 @@ CSG.Matrix4x4.prototype = {
       y *= invw;
       z *= invw;
     }
-    return new CSG.Vector(x,y,z);       
+    return new CSG.Vector3D(x,y,z);       
   },
   
   // Multiply a CSG.Vector2D (interpreted as 1 row, 2 column) by this matrix 
@@ -1476,8 +1872,8 @@ CSG.Matrix4x4.rotationZ = function(degrees) {
 
 // Create an affine matrix for translation:
 CSG.Matrix4x4.translation = function(v) {
-  // parse as CSG.Vector, so we can pass an array or a CSG.Vector
-  var vec = new CSG.Vector(v);
+  // parse as CSG.Vector3D, so we can pass an array or a CSG.Vector3D
+  var vec = new CSG.Vector3D(v);
   var els = [
     1, 0, 0, vec.x,
     0, 1, 0, vec.y,
@@ -1489,8 +1885,8 @@ CSG.Matrix4x4.translation = function(v) {
 
 // Create an affine matrix for scaling:
 CSG.Matrix4x4.scaling = function(v) {
-  // parse as CSG.Vector, so we can pass an array or a CSG.Vector
-  var vec = new CSG.Vector(v);
+  // parse as CSG.Vector3D, so we can pass an array or a CSG.Vector3D
+  var vec = new CSG.Vector3D(v);
   var els = [
     vec.x, 0, 0, 0,
     0, vec.y, 0, 0,
@@ -1505,22 +1901,46 @@ CSG.Matrix4x4.scaling = function(v) {
 // # class Vector2D:
 // Represents a 2 element vector
 CSG.Vector2D = function(x, y) {
-  if (arguments.length == 2) {
-    this.x = x;
-    this.y = y;
-  } else if ('x' in x) {
-    this.x = x.x;
-    this.y = x.y;
-  } else {
-    this.x = x[0];
-    this.y = x[1];
+  var ok = true;
+  if (arguments.length == 1)
+  {
+    if(typeof(x) == "object")
+    {
+      if(x instanceof Array)
+      {
+        this.x = x[0];
+        this.y = x[1];
+      }  
+      else if( ('x' in x) && ('y' in x) )
+      {
+        this.x = x.x;
+        this.y = x.y;
+      }
+      else ok = false;
+    }
+    else
+    {
+      var v = Number(x);
+      this.x = v;
+      this.y = v;
+    }
+  }
+  else if (arguments.length == 2)
+  {
+    this.x = Number(x);
+    this.y = Number(y);
+  }
+  else ok = false;
+  if(!ok)
+  {
+    throw new Error("wrong arguments");
   }
 };
 
 CSG.Vector2D.prototype = {
   // extend to a 3D vector by adding a z coordinate:
   toVector3D: function(z) {
-    return new CSG.Vector2D(this.x, this.y, z);
+    return new CSG.Vector3D(this.x, this.y, z);
   },
   
   equals: function(a) {
@@ -1630,36 +2050,14 @@ CSG.Polygon2D.prototype = {
   
   // extruded=shape2d.extrude({offset: [0,0,10], twistangle: 360, twiststeps: 100});
   // linear extrusion of 2D polygon, with optional twist
-  // The 2d polygon is placed in in z=0 plane and extruded into direction <offset> (a CSG.Vector)
+  // The 2d polygon is placed in in z=0 plane and extruded into direction <offset> (a CSG.Vector3D)
   // The final face is rotated <twistangle> degrees. Rotation is done around the origin of the 2d shape (i.e. x=0, y=0)
   // twiststeps determines the resolution of the twist (should be >= 1)  
   // returns a CSG object
-  extrude: function(params) {
-    // parse parameters:
-    if(!params) params={};
-    var offsetvector;
-    if("offset" in params)
-    {
-      offsetvector = new CSG.Vector(params.offset); // reparse as a CSG.Vector
-    }
-    else
-    {
-      offsetvector = new CSG.Vector(0,0,1);
-    }
-    
-    var twistangle=0;
-    if("twistangle" in params)
-    {
-      twistangle = params.twistangle;
-    }
-    
-    var twiststeps=10;
-    if("twiststeps" in params)
-    {
-      twiststeps = params.twiststeps;
-    }
-    if(twistangle == 0) twiststeps=1;
-    if(twiststeps < 1) twiststeps=1;
+  extrude: function(options) {
+    var offsetvector = CSG.parseOptionAs3DVector(options, "offset", [0,0,1]);
+    var twistangle = CSG.parseOptionAsFloat(options, "twistangle", 0);
+    var twiststeps = CSG.parseOptionAsInt(options, "twiststeps", 10);
 
     // create the polygons:        
     var newpolygons = [];
@@ -1712,143 +2110,6 @@ CSG.Polygon2D.prototype = {
   }
 };
 
-CSG.Polygon.prototype.extrude = function(offsetvector) {
-  var newpolygons = [];
-
-  var polygon1=this;
-  var direction = polygon1.plane.normal.dot(offsetvector);
-  if(direction > 0)
-  {
-    polygon1 = polygon1.flipped();
-  }
-  newpolygons.push(polygon1);
-  var polygon2=polygon1.translate(offsetvector);
-  var numvertices=this.vertices.length;
-  for(var i=0; i < numvertices; i++)
-  {
-    var sidefacepoints = [];
-    var nexti = (i < (numvertices-1))? i+1:0;
-    sidefacepoints.push(polygon1.vertices[i].pos);
-    sidefacepoints.push(polygon2.vertices[i].pos);
-    sidefacepoints.push(polygon2.vertices[nexti].pos);
-    sidefacepoints.push(polygon1.vertices[nexti].pos);
-    var sidefacepolygon=CSG.Polygon.createFromPoints(sidefacepoints);
-    newpolygons.push(sidefacepolygon);
-  }
-  polygon2 = polygon2.flipped();
-  newpolygons.push(polygon2);
-  return CSG.fromPolygons(newpolygons);
-};
-
-CSG.Polygon.prototype.translate = function(offset) {
-  return this.transform(CSG.Matrix4x4.translation(offset));
-};
-
-// Expand the polygon with a certain radius
-// This extrudes the face of the polygon and adds rounded corners 
-// Returns a CSG object (not a polygon anymore!)
-// resolution: number of points per 360 degree for the rounded corners
-CSG.Polygon.prototype.expand = function(radius, resolution) {
-  if( (!resolution) || (resolution < 4) ) resolution = 4;
-  resolution = 4 * Math.floor(resolution / 4);
-
-  var result=new CSG();
-  
-  // expand each side of the polygon. The expansion of a line is a cylinder with
-  // two spheres at the end:
-  var numvertices=this.vertices.length;
-  for(var i=0; i < numvertices; i++)
-  {
-    var previ = (i == 0) ? (numvertices-1):i-1;
-    var p1 = this.vertices[previ].pos;
-    var p2 = this.vertices[i].pos;
-
-    var roundedCylinder = CSG.roundedCylinder(p1, p2, this.plane.normal, radius, resolution);
-    result = result.unionSub(roundedCylinder, false, false);
-    
-//    var cylinder=CSG.cylinder({start: p1, end: p2, radius: radius, slices: resolution});
-//    result = result.unionSub(cylinder,false, false);
-//    var sphere = CSG.sphere({center: p1, radius: radius, slices: resolution, stacks: resolution});
-//    result = result.unionSub(sphere,false, false);
-  }
-  var extrudevector=this.plane.normal.unit().times(2*radius);
-  var translatedpolygon = this.translate(extrudevector.times(-0.5));
-  var extrudedface = translatedpolygon.extrude(extrudevector);  
-  result=result.unionSub(extrudedface, true, false);
-  return result;
-};
-
-// Expand the solid
-// resolution: number of points per 360 degree for the rounded corners
-CSG.prototype.expand = function(radius, resolution) {
-  var result=this;
-  this.polygons.map(function(p) {
-    var expanded=p.expand(radius, resolution);
-    result=result.unionSub(expanded, true, false);
-  });
-  result = result.canonicalized();
-  return result;
-};
-
-// Contract the solid
-// resolution: number of points per 360 degree for the rounded corners
-CSG.prototype.contract = function(radius, resolution) {
-  var result=this;
-  this.polygons.map(function(p) {
-    var expanded=p.expand(radius, resolution);
-    result=result.subtract(expanded);
-  });
-  return result;
-};
-
-CSG.roundedCube = function(cuberadius, roundradius, resolution) {
-  resolution = resolution || 8;
-  cuberadius=new CSG.Vector(cuberadius);
-  var innercuberadius=cuberadius.clone();
-  innercuberadius.x -= roundradius;
-  innercuberadius.y -= roundradius;
-  innercuberadius.z -= roundradius;
-  var result = CSG.cube({radius: [cuberadius.x, innercuberadius.y, innercuberadius.z]});
-  result = result.union( CSG.cube({radius: [innercuberadius.x, cuberadius.y, innercuberadius.z]}));
-  result = result.union( CSG.cube({radius: [innercuberadius.x, innercuberadius.y, cuberadius.z]}));
-  for(var level=0; level < 2; level++)
-  {
-    var z = innercuberadius.z;
-    if(level == 1) z = -z;
-    var p1 = new CSG.Vector(innercuberadius.x, innercuberadius.y, z);
-    var p2 = new CSG.Vector(innercuberadius.x, -innercuberadius.y, z);
-    var p3 = new CSG.Vector(-innercuberadius.x, -innercuberadius.y, z);
-    var p4 = new CSG.Vector(-innercuberadius.x, innercuberadius.y, z);
-    var sphere = CSG.sphere({center: p1, radius: roundradius, slices: resolution, stacks: resolution});
-    result = result.union(sphere);
-    sphere = CSG.sphere({center: p2, radius: roundradius, slices: resolution, stacks: resolution});
-    result = result.union(sphere);
-    sphere = CSG.sphere({center: p3, radius: roundradius, slices: resolution, stacks: resolution});
-    result = result.union(sphere);
-    sphere = CSG.sphere({center: p4, radius: roundradius, slices: resolution, stacks: resolution});
-    result = result.union(sphere);
-    var cylinder = CSG.cylinder({start:p1, end: p2, radius: roundradius, slices: resolution});
-    result = result.union(cylinder);
-    cylinder = CSG.cylinder({start:p2, end: p3, radius: roundradius, slices: resolution});
-    result = result.union(cylinder);
-    cylinder = CSG.cylinder({start:p3, end: p4, radius: roundradius, slices: resolution});
-    result = result.union(cylinder);
-    cylinder = CSG.cylinder({start:p4, end: p1, radius: roundradius, slices: resolution});
-    result = result.union(cylinder);
-    if(level == 0) {
-      var d = new CSG.Vector(0, 0, -2*z);
-      cylinder = CSG.cylinder({start:p1, end: p1.plus(d), radius: roundradius, slices: resolution});
-      result = result.union(cylinder);
-      cylinder = CSG.cylinder({start:p2, end: p2.plus(d), radius: roundradius, slices: resolution});
-      result = result.union(cylinder);
-      cylinder = CSG.cylinder({start:p3, end: p3.plus(d), radius: roundradius, slices: resolution});
-      result = result.union(cylinder);
-      cylinder = CSG.cylinder({start:p4, end: p4.plus(d), radius: roundradius, slices: resolution});
-      result = result.union(cylinder);
-    }
-  }
-  return result;
-}
 
 
 // # class Line2D
@@ -1912,25 +2173,15 @@ CSG.Line2D.prototype = {
 // Represents a line in 3D space
 // direction must be a unit vector 
 // point is a random point on the line
+
 CSG.Line3D = function(point, direction) {
   this.point = point;
   this.direction = direction;
 };
 
 CSG.Line3D.fromPoints = function(p1, p2) {
-  // make the line (somewhat) canonical by always using the point closest to the origin
-  // as the reference point
   var direction = p2.minus(p1).unit();
-  var l1 = p1.dot(p1);
-  var l2 = p2.dot(p2);
-  if(l1 > l2)
-  {
-    return new CSG.Line3D(p2, direction);
-  }
-  else
-  {
-    return new CSG.Line3D(p1, direction);
-  }
+  return new CSG.Line3D(p1, direction);
 };
 
 CSG.Line3D.fromPlanes = function(p1, p2) {
@@ -1951,19 +2202,19 @@ CSG.Line3D.fromPlanes = function(p1, p2) {
     // direction vector is mostly pointing towards x
     // find a point p for which x is zero:
     var r = CSG.Line3D.Solve2Linear(p1.normal.y, p1.normal.z, p2.normal.y, p2.normal.z, p1.w, p2.w);    
-    origin = new CSG.Vector(0, r[0], r[1]);
+    origin = new CSG.Vector3D(0, r[0], r[1]);
   }
   else if( (mabsy >= mabsx) && (mabsy >= mabsz) )
   {
     // find a point p for which y is zero:
     var r = CSG.Line3D.Solve2Linear(p1.normal.x, p1.normal.z, p2.normal.x, p2.normal.z, p1.w, p2.w);    
-    origin = new CSG.Vector(r[0], 0, r[1]);
+    origin = new CSG.Vector3D(r[0], 0, r[1]);
   }
   else
   {
     // find a point p for which z is zero:
     var r = CSG.Line3D.Solve2Linear(p1.normal.x, p1.normal.y, p2.normal.x, p2.normal.y, p1.w, p2.w);    
-    origin = new CSG.Vector(r[0], r[1], 0);
+    origin = new CSG.Vector3D(r[0], r[1], 0);
   }
   return new CSG.Line3D(origin, direction);
 };
@@ -2027,91 +2278,25 @@ CSG.Line3D.prototype = {
   },
 };
 
-CSG.roundedCylinder = function(p1, p2, normal, radius, resolution) {
-  var polygons = [];
-  if(resolution < 4) resolution = 4;
-  var qresolution = Math.floor(0.25*resolution);
-  var direction = p2.minus(p1);
-  var length = direction.length();
-  if(length < 1e-10)
-  {
-    return CSG.sphere({center: p1, radius: radius, slices: resolution, stacks: resolution});
-  }
-  var zvector = direction.unit().times(radius);
-  var xvector = zvector.cross(normal).unit().times(radius);
-  var yvector = xvector.cross(zvector).unit().times(radius);
-  var prevcylinderpoint;
-  for(var slice1 = 0; slice1 <= resolution; slice1++)
-  {
-    var angle = Math.PI * 2.0 * slice1 / resolution;
-    var cylinderpoint = xvector.times(Math.cos(angle)).plus(yvector.times(Math.sin(angle)));
-    if(slice1 > 0)
-    {
-      // cylinder vertices:
-      var vertices = [];
-      vertices.push(new CSG.Vertex(p1.plus(cylinderpoint)));
-      vertices.push(new CSG.Vertex(p1.plus(prevcylinderpoint)));
-      vertices.push(new CSG.Vertex(p2.plus(prevcylinderpoint)));
-      vertices.push(new CSG.Vertex(p2.plus(cylinderpoint)));
-      polygons.push(new CSG.Polygon(vertices));
-      var prevcospitch, prevsinpitch;
-      for(var slice2 = 0; slice2 <= qresolution; slice2++)
-      {
-        var pitch = 0.5 * Math.PI * slice2 / qresolution;
-        var cospitch = Math.cos(pitch);
-        var sinpitch = Math.sin(pitch);
-        if(slice2 > 0)
-        {
-          vertices = [];
-          vertices.push(new CSG.Vertex(p1.plus(prevcylinderpoint.times(prevcospitch).minus(zvector.times(prevsinpitch)))));
-          vertices.push(new CSG.Vertex(p1.plus(cylinderpoint.times(prevcospitch).minus(zvector.times(prevsinpitch)))));
-          if(slice2 < qresolution)
-          {
-            vertices.push(new CSG.Vertex(p1.plus(cylinderpoint.times(cospitch).minus(zvector.times(sinpitch)))));
-          }
-          vertices.push(new CSG.Vertex(p1.plus(prevcylinderpoint.times(cospitch).minus(zvector.times(sinpitch)))));
-          polygons.push(new CSG.Polygon(vertices));
-          vertices = [];
-          vertices.push(new CSG.Vertex(p2.plus(prevcylinderpoint.times(prevcospitch).plus(zvector.times(prevsinpitch)))));
-          vertices.push(new CSG.Vertex(p2.plus(cylinderpoint.times(prevcospitch).plus(zvector.times(prevsinpitch)))));
-          if(slice2 < qresolution)
-          {
-            vertices.push(new CSG.Vertex(p2.plus(cylinderpoint.times(cospitch).plus(zvector.times(sinpitch)))));
-          }
-          vertices.push(new CSG.Vertex(p2.plus(prevcylinderpoint.times(cospitch).plus(zvector.times(sinpitch)))));
-          vertices.reverse();
-          polygons.push(new CSG.Polygon(vertices));
-        }
-        prevcospitch = cospitch; 
-        prevsinpitch = sinpitch; 
-      }
-    }
-    prevcylinderpoint = cylinderpoint;
-  }
-  return CSG.fromPolygons(polygons);
-};
-
 
 // # class OrthoNormalBasis
 
-CSG.OrthoNormalBasis = function (plane, rot90) {
+// Reprojects points on a 3D plane onto a 2D plane
+// or from a 2D plane back onto the 3D plane
+
+CSG.OrthoNormalBasis = function (plane) {
+  // choose an arbitrary right hand vector, making sure it is somewhat orthogonal to the plane normal:
   var rightvector;
   if(Math.abs(plane.normal.x) > Math.abs(plane.normal.y))
   {
-    rightvector = new CSG.Vector(0, 1, 0);
+    rightvector = new CSG.Vector3D(0, 1, 0);
   }
   else
   {
-    rightvector = new CSG.Vector(1, 0, 0);
+    rightvector = new CSG.Vector3D(1, 0, 0);
   }
   this.v = rightvector.cross(plane.normal).unit();
   this.u = plane.normal.cross(this.v);
-  if(rot90)
-  {
-    var v = this.u.negated();
-    this.u = this.v;
-    this.v = v;    
-  }
   this.planeorigin = plane.normal.times(plane.w);
 };
 
@@ -2193,15 +2378,17 @@ CSG.interpolateBetween2DPointsForY = function(point1, point2, y) {
   return result;
 };
 
-
+// Retesselation function for a set of coplanar polygons. See the introduction at the top of
+// this file.
 CSG.reTesselateCoplanarPolygons = function(sourcepolygons, destpolygons)
 {
   var EPS = 1e-5;
+  
   var numpolygons = sourcepolygons.length;
   if(numpolygons > 0)
   {
     var plane = sourcepolygons[0].plane;
-    var orthobasis = new CSG.OrthoNormalBasis(plane, false);
+    var orthobasis = new CSG.OrthoNormalBasis(plane);
     var polygonvertices2d = [];    // array of array of CSG.Vector2D
     var polygontopvertexindexes = []; // array of indexes of topmost vertex per polygon
     var topy2polygonindexes = {};
@@ -2213,6 +2400,7 @@ CSG.reTesselateCoplanarPolygons = function(sourcepolygons, destpolygons)
     // convert all polygon vertices to 2D
     // Make a list of all encountered y coordinates
     // And build a map of all polygons that have a vertex at a certain y coordinate:    
+    var ycoordinateBinningFactor = 1.0/EPS * 10;
     for(var polygonindex=0; polygonindex < numpolygons; polygonindex++)
     {
       var poly3d = sourcepolygons[polygonindex];
@@ -2225,9 +2413,9 @@ CSG.reTesselateCoplanarPolygons = function(sourcepolygons, destpolygons)
         for(var i=0; i < numvertices; i++)
         {
           var pos2d = orthobasis.to2D(poly3d.vertices[i].pos);
-          // perform binning of y coordinates: If we have multiple vertexes very
-          // close to each other, give them the same coordinates:
-          var ycoordinatebin = Math.floor(pos2d.y * 1e6);
+          // perform binning of y coordinates: If we have multiple vertices very
+          // close to each other, give them the same y coordinate:
+          var ycoordinatebin = Math.floor(pos2d.y * ycoordinateBinningFactor);
           if(ycoordinatebin in ycoordinatebins)
           {
             pos2d.y = ycoordinatebins[ycoordinatebin];
@@ -2285,6 +2473,13 @@ CSG.reTesselateCoplanarPolygons = function(sourcepolygons, destpolygons)
 
     // Now we will iterate over all y coordinates, from lowest to highest y coordinate
     // activepolygons: source polygons that are 'active', i.e. intersect with our y coordinate
+    //   Is sorted so the polygons are in left to right order
+    // Each element in activepolygons has these properties:
+    //        polygonindex: the index of the source polygon (i.e. an index into the sourcepolygons and polygonvertices2d arrays)
+    //        leftvertexindex: the index of the vertex at the left side of the polygon (lowest x) that is at or just above the current y coordinate
+    //        rightvertexindex: dito at right hand side of polygon
+    //        topleft, bottomleft: coordinates of the left side of the polygon crossing the current y coordinate  
+    //        topright, bottomright: coordinates of the right hand side of the polygon crossing the current y coordinate  
     var activepolygons = [];
     var prevoutpolygonrow = [];
     for(var yindex = 0; yindex < ycoordinates.length; yindex++)
@@ -2559,59 +2754,21 @@ CSG.reTesselateCoplanarPolygons = function(sourcepolygons, destpolygons)
   } // if(numpolygons > 0)
 }
 
-CSG.prototype.canonicalized = function () {
-  if(this.isCanonicalized)
-  {
-    return this;
-  }
-  else
-  {
-    var factory = new CSG.fuzzyCSGFactory();
-    var result = factory.getCSG(this);
-    result.isCanonicalized = true;
-    return result;
-  }
-};
-
-CSG.prototype.reTesselate = function () {
-  if(this.isRetesselated)
-  {
-    return this;
-  }
-  else
-  {
-    var csg=this; //.canonicalized();
-    var polygonsPerPlane = {};
-    csg.polygons.map(function(polygon) {
-      var planetag = polygon.plane.getTag();
-      if(! (planetag in polygonsPerPlane) )
-      {
-        polygonsPerPlane[planetag] = [];
-      }
-      polygonsPerPlane[planetag].push(polygon);
-    });
-    var destpolygons = [];
-    for(planetag in polygonsPerPlane)
-    {
-      var sourcepolygons = polygonsPerPlane[planetag];
-      if(sourcepolygons.length < 2)
-      {
-        destpolygons = destpolygons.concat(sourcepolygons);
-      }
-      else
-      {
-        var retesselayedpolygons = [];
-        CSG.reTesselateCoplanarPolygons(sourcepolygons, retesselayedpolygons);
-        destpolygons = destpolygons.concat(retesselayedpolygons);
-      }
-    }
-    var result = CSG.fromPolygons(destpolygons);
-    result.isRetesselated = true;
-    return result;
-  }
-};
-
 ////////////////////////////////
+
+// ## class fuzzyFactory
+
+// This class acts as a factory for objects. We can search for an object with approximately
+// the desired properties (say a rectangle with width 2 and height 1) 
+// The lookupOrCreate() method looks for an existing object (for example it may find an existing rectangle
+// with width 2.0001 and height 0.999. If no object is found, the user supplied callback is
+// called, which should generate a new object. The new object is inserted into the database
+// so it can be found by future lookupOrCreate() calls.
+
+// Constructor:
+//   numdimensions: the number of parameters for each object
+//     for example for a 2D rectangle this would be 2
+//   tolerance: The maximum difference for each parameter allowed to be considered a match
 
 CSG.fuzzyFactory = function(numdimensions, tolerance) {
   var lookuptable = [];
@@ -2623,19 +2780,6 @@ CSG.fuzzyFactory = function(numdimensions, tolerance) {
   this.nextElementId = 1;
   this.multiplier = 1.0 / tolerance;
   this.objectTable = {};
-};
-
-CSG.fuzzyFactory.insertKey = function(key, lookuptable, quantizedvalue) {
-  if(quantizedvalue in lookuptable)
-  {
-    lookuptable[quantizedvalue][key] = true;
-  }
-  else
-  {
-    var newset = {};
-    newset[key] = true;
-    lookuptable[quantizedvalue] = newset;
-  }
 };
 
 CSG.fuzzyFactory.prototype = {
@@ -2718,6 +2862,19 @@ CSG.fuzzyFactory.prototype = {
   },
 };
 
+CSG.fuzzyFactory.insertKey = function(key, lookuptable, quantizedvalue) {
+  if(quantizedvalue in lookuptable)
+  {
+    lookuptable[quantizedvalue][key] = true;
+  }
+  else
+  {
+    var newset = {};
+    newset[key] = true;
+    lookuptable[quantizedvalue] = newset;
+  }
+};
+
 CSG.fuzzyFactory.isEmptySet = function(obj) {
   for(var key in obj) return false;
   return true;
@@ -2792,6 +2949,7 @@ CSG.fuzzyCSGFactory.prototype = {
 
 //////////////////////////////////////
 
+// Tag factory: we can request a unique tag through CSG.getTag() 
 CSG.staticTag = 1;
 
 CSG.getTag = function () {
