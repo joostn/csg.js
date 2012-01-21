@@ -974,6 +974,14 @@ CSG.Plane.fromPoints = function(a, b, c) {
   return CSG.Plane.fromVector3Ds(a, b, c);
 };
 
+CSG.Plane.fromNormalAndPoint = function(normal, point) {
+  normal = new CSG.Vector3D(normal);
+  point = new CSG.Vector3D(point);
+  normal = normal.unit();
+  var w = point.dot(normal);
+  return new CSG.Plane(normal, w);
+};
+
 CSG.Plane.prototype = {
   flipped: function() {
     return new CSG.Plane(this.normal.negated(), -this.w);
