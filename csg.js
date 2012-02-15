@@ -90,6 +90,7 @@ for solid CAD anyway.
 
 CSG = function() {
   this.polygons = [];
+  this.properties = new CSG.Properties();
 };
 
 // Construct a CSG solid from a list of `CSG.Polygon` instances.
@@ -97,6 +98,14 @@ CSG.fromPolygons = function(polygons) {
   var csg = new CSG();
   csg.polygons = polygons;
   return csg;
+};
+
+// create from an untyped object with identical property names:
+CSG.fromObject = function(obj) {
+  var polygons = obj.polygons.map( function(p) {
+    return CSG.Polygon.fromObject(p);
+  });
+  return CSG.fromPolygons(polygons);
 };
 
 CSG.prototype = {
@@ -128,10 +137,20 @@ CSG.prototype = {
     a.clipTo(b, false);
     b.clipTo(a, true);    
     var newpolygons = a.allPolygons().concat(b.allPolygons());
-    var csg = CSG.fromPolygons(newpolygons);
-    if(canonicalize) csg = csg.canonicalized();
-    if(retesselate) csg = csg.reTesselated();              
-    return csg;
+    var result = CSG.fromPolygons(newpolygons);
+    result.properties = this.properties._merge(csg.properties);
+    if(canonicalize) result = result.canonicalized();
+    if(retesselate) result = result.reTesselated();              
+    return result;
+  },
+
+  // Like union, but when we know that the two solids are not intersecting
+  // Do not use if you are not completely sure that the solids do not intersect!
+  unionForNonIntersecting: function(csg) {
+    var newpolygons = this.polygons.concat(csg.polygons);
+    var result = CSG.fromPolygons(newpolygons);
+    result.properties = this.properties._merge(csg.properties);
+    return result;
   },
 
   // Return a new CSG solid representing space in this solid but not in the
@@ -160,10 +179,11 @@ CSG.prototype = {
     b.clipTo(a, true);    
     a.addPolygons(b.allPolygons());
     a.invert();
-    var csg = CSG.fromPolygons(a.allPolygons());
-    if(canonicalize) csg = csg.canonicalized();
-    if(retesselate) csg = csg.reTesselated();
-    return csg;
+    var result = CSG.fromPolygons(a.allPolygons());
+    result.properties = this.properties._merge(csg.properties);
+    if(canonicalize) result = result.canonicalized();
+    if(retesselate) result = result.reTesselated();              
+    return result;
   },
 
   // Return a new CSG solid representing space both this solid and in the
@@ -194,10 +214,11 @@ CSG.prototype = {
     b.clipTo(a);
     a.addPolygons(b.allPolygons());
     a.invert();
-    var csg = CSG.fromPolygons(a.allPolygons());
-    if(canonicalize) csg = csg.canonicalized();
-    if(retesselate) csg = csg.reTesselated();
-    return csg;
+    var result = CSG.fromPolygons(a.allPolygons());
+    result.properties = this.properties._merge(csg.properties);
+    if(canonicalize) result = result.canonicalized();
+    if(retesselate) result = result.reTesselated();              
+    return result;
   },
 
   // Return a new CSG solid with solid and empty space switched. This solid is
@@ -205,17 +226,19 @@ CSG.prototype = {
   inverse: function() {
     var flippedpolygons = this.polygons.map(function(p) { return p.flipped(); });
     return CSG.fromPolygons(flippedpolygons);
+    // TODO: flip properties
   },
   
   // Affine transformation of CSG object. Returns a new CSG object
   transform: function(matrix4x4) {
     var newpolygons = this.polygons.map(function(p) { return p.transform(matrix4x4); } );
-    return CSG.fromPolygons(newpolygons);  
+    var result=CSG.fromPolygons(newpolygons); 
+    result.properties = this.properties._transform(matrix4x4);
+    return result; 
   },
 
   mirrored: function(plane) {
-    var newpolygons = this.polygons.map(function(p) { return p.mirrored(plane); } );
-    return CSG.fromPolygons(newpolygons);  
+    return this.transform(CSG.Matrix4x4.mirroring(plane));
   },
   
   mirroredX: function() {
@@ -261,7 +284,7 @@ CSG.prototype = {
   },
   
   toString: function() {
-    var result = "";
+    var result = "CSG solid:\n";
     this.polygons.map(function(p){ result += p.toString(); });
     return result;
   },
@@ -275,6 +298,7 @@ CSG.prototype = {
       result=result.unionSub(expanded, true, false);
     });
     result = result.canonicalized();
+    result.properties = this.properties;  // keep original properties
     return result;
   },
   
@@ -286,6 +310,7 @@ CSG.prototype = {
       var expanded=p.expand(radius, resolution);
       result=result.subtract(expanded);
     });
+    result.properties = this.properties;  // keep original properties
     return result;
   },
 
@@ -299,6 +324,7 @@ CSG.prototype = {
       var factory = new CSG.fuzzyCSGFactory();
       var result = factory.getCSG(this);
       result.isCanonicalized = true;
+      result.properties = this.properties;  // keep original properties
       return result;
     }
   },
@@ -337,6 +363,7 @@ CSG.prototype = {
       }
       var result = CSG.fromPolygons(destpolygons);
       result.isRetesselated = true;
+      result.properties = this.properties;  // keep original properties
       return result;
     }
   },
@@ -405,8 +432,22 @@ CSG.prototype = {
     var cube = polygon.extrude(plane.normal.times(-maxdistance));
     
     // Now we can do the intersection:
-    return this.intersect(cube);
+    var result = this.intersect(cube);
+    result.properties = this.properties;  // keep original properties
+    return result;
   },
+
+  // Connect a solid to another solid, such that two CSG.Connectors become connected
+  //   myConnector: a CSG.Connector of this solid
+  //   otherConnector: a CSG.Connector to which myConnector should be connected
+  //   mirror: false: the 'axis' vectors of the connectors should point in the same direction
+  //           true: the 'axis' vectors of the connectors should point in opposite direction
+  //   normalrotation: degrees of rotation between the 'normal' vectors of the two
+  //                   connectors
+  connectTo: function(myConnector, otherConnector, mirror, normalrotation) {
+    var matrix = myConnector.getTransformationTo(otherConnector, mirror, normalrotation);
+    return this.transform(matrix);
+  }, 
     
 };
 
@@ -432,6 +473,14 @@ CSG.parseOptionAs3DVector = function(options, optionname, defaultvalue) {
   return result;
 };
 
+// Parse an option and force into a CSG.Vector2D. If a scalar is passed it is converted
+// into a vector with equal x,y
+CSG.parseOptionAs2DVector = function(options, optionname, defaultvalue) {
+  var result = CSG.parseOption(options, optionname, defaultvalue);
+  result = new CSG.Vector2D(result);
+  return result;
+};
+
 CSG.parseOptionAsFloat = function(options, optionname, defaultvalue) {
   var result = CSG.parseOption(options, optionname, defaultvalue);
   if(typeof(result) == "string")
@@ -450,6 +499,18 @@ CSG.parseOptionAsInt = function(options, optionname, defaultvalue) {
   return Number(Math.floor(result));
 };
 
+CSG.parseOptionAsBool = function(options, optionname, defaultvalue) {
+  var result = CSG.parseOption(options, optionname, defaultvalue);
+  if(typeof(result) == "string")
+  {
+    if(result == "true") result = true;
+    if(result == "false") result = false;
+    if(result == 0) result = false;
+  }
+  result = !!result;
+  return result;
+};
+
 // Construct an axis-aligned solid cuboid.
 // Parameters:
 //   center: center of cube (default [0,0,0])
@@ -464,7 +525,7 @@ CSG.parseOptionAsInt = function(options, optionname, defaultvalue) {
 CSG.cube = function(options) {
   var c = CSG.parseOptionAs3DVector(options, "center", [0,0,0]);
   var r = CSG.parseOptionAs3DVector(options, "radius", [1,1,1]);
-  return CSG.fromPolygons([
+  var result = CSG.fromPolygons([
     [[0, 4, 6, 2], [-1, 0, 0]],
     [[1, 3, 7, 5], [+1, 0, 0]],
     [[0, 1, 5, 4], [0, -1, 0]],
@@ -484,6 +545,18 @@ CSG.cube = function(options) {
     });
     return new CSG.Polygon(vertices, null /* , plane */);
   }));
+  result.properties.cube = new CSG.Properties();
+  result.properties.cube.center = new CSG.Vector3D(c);
+  // add 6 connectors, at the centers of each face:
+  result.properties.cube.facecenters = [
+    new CSG.Connector(new CSG.Vector3D([r.x, 0, 0]).plus(c), [1, 0, 0], [0, 0, 1]),
+    new CSG.Connector(new CSG.Vector3D([-r.x, 0, 0]).plus(c), [-1, 0, 0], [0, 0, 1]),
+    new CSG.Connector(new CSG.Vector3D([0, r.y, 0]).plus(c), [0, 1, 0], [0, 0, 1]),
+    new CSG.Connector(new CSG.Vector3D([0, -r.y, 0]).plus(c), [0, -1, 0], [0, 0, 1]),
+    new CSG.Connector(new CSG.Vector3D([0, 0, r.z]).plus(c), [0, 0, 1], [1, 0, 0]),
+    new CSG.Connector(new CSG.Vector3D([0, 0, -r.z]).plus(c), [0, 0, -1], [1, 0, 0]),
+  ];
+  return result;
 };
 
 // Construct a solid sphere
@@ -554,7 +627,11 @@ CSG.sphere = function(options) {
     }
     prevcylinderpoint = cylinderpoint;
   }
-  return CSG.fromPolygons(polygons);  
+  var result = CSG.fromPolygons(polygons);  
+  result.properties.sphere = new CSG.Properties();
+  result.properties.sphere.center = new CSG.Vector3D(center);
+  result.properties.sphere.facepoint = center.plus(xvector);
+  return result;
 };
 
 // Construct a solid cylinder.
@@ -598,7 +675,12 @@ CSG.cylinder = function(options) {
     polygons.push(new CSG.Polygon([point(0, t1, 0), point(0, t0, 0), point(1, t0, 0), point(1, t1, 0)]));
     polygons.push(new CSG.Polygon([end, point(1, t1, 1), point(1, t0, 1)]));
   }
-  return CSG.fromPolygons(polygons);
+  var result = CSG.fromPolygons(polygons);  
+  result.properties.cylinder = new CSG.Properties();
+  result.properties.cylinder.start = new CSG.Connector(s, axisZ.negated(), axisX);
+  result.properties.cylinder.end = new CSG.Connector(e, axisZ, axisX);
+  result.properties.cylinder.facepoint = s.plus(axisX.times(r));
+  return result;
 };
 
 // Like a cylinder, but with rounded ends instead of flat
@@ -693,7 +775,14 @@ CSG.roundedCylinder = function(options) {
     }
     prevcylinderpoint = cylinderpoint;
   }
-  return CSG.fromPolygons(polygons);
+  var result = CSG.fromPolygons(polygons);
+  var ray = zvector.unit();
+  var axisX = xvector.unit();  
+  result.properties.roundedCylinder = new CSG.Properties();
+  result.properties.roundedCylinder.start = new CSG.Connector(p1, ray.negated(), axisX);
+  result.properties.roundedCylinder.end = new CSG.Connector(p2, ray, axisX);
+  result.properties.roundedCylinder.facepoint = p1.plus(xvector);
+  return result;
 };
 
 // Construct an axis-aligned solid rounded cuboid.
@@ -760,8 +849,18 @@ CSG.roundedCube = function(options) {
       result = result.unionSub(cylinder,true,true);
     }
   }
+  result.properties.roundedCube = new CSG.Properties();
+  result.properties.roundedCube.center = new CSG.Vertex(center);
+  result.properties.roundedCube.facecenters = [
+    new CSG.Connector(new CSG.Vector3D([cuberadius.x, 0, 0]).plus(center), [1, 0, 0], [0, 0, 1]),
+    new CSG.Connector(new CSG.Vector3D([-cuberadius.x, 0, 0]).plus(center), [-1, 0, 0], [0, 0, 1]),
+    new CSG.Connector(new CSG.Vector3D([0, cuberadius.y, 0]).plus(center), [0, 1, 0], [0, 0, 1]),
+    new CSG.Connector(new CSG.Vector3D([0, -cuberadius.y, 0]).plus(center), [0, -1, 0], [0, 0, 1]),
+    new CSG.Connector(new CSG.Vector3D([0, 0, cuberadius.z]).plus(center), [0, 0, 1], [1, 0, 0]),
+    new CSG.Connector(new CSG.Vector3D([0, 0, -cuberadius.z]).plus(center), [0, 0, -1], [1, 0, 0]),
+  ];
   return result;
-}
+};
 
 
 
@@ -825,6 +924,10 @@ CSG.Vector3D.prototype = {
     return new CSG.Vector3D(-this.x, -this.y, -this.z);
   },
 
+  abs: function() {
+    return new CSG.Vector3D(Math.abs(this.x), Math.abs(this.y), Math.abs(this.z));
+  },
+
   plus: function(a) {
     return new CSG.Vector3D(this.x + a.x, this.y + a.y, this.z + a.z);
   },
@@ -884,7 +987,11 @@ CSG.Vector3D.prototype = {
   // Right multiply by a 4x4 matrix (the vector is interpreted as a row vector)
   // Returns a new CSG.Vector3D
   multiply4x4: function(matrix4x4) {
-    return matrix4x4.rightMultiply1x3Vector(this);
+    return matrix4x4.leftMultiply1x3Vector(this);
+  },
+  
+  transform: function(matrix4x4) {
+    return matrix4x4.leftMultiply1x3Vector(this);
   },
   
   toStlString: function() {
@@ -893,6 +1000,23 @@ CSG.Vector3D.prototype = {
   
   toString: function() {
     return "("+this.x+", "+this.y+", "+this.z+")";
+  },
+  
+  // find a vector that is somewhat perpendicular to this one
+  randomNonParallelVector: function() {
+    var abs = this.abs();
+    if( (abs.x <= abs.y) && (abs.x <= abs.z) )
+    {
+      return new CSG.Vector3D(1,0,0);
+    }
+    else if( (abs.y <= abs.x) && (abs.y <= abs.z) )
+    {
+      return new CSG.Vector3D(0,1,0);
+    }
+    else
+    {
+      return new CSG.Vector3D(0,0,1);
+    }
   },
   
 };
@@ -907,6 +1031,12 @@ CSG.Vector3D.prototype = {
 
 CSG.Vertex = function(pos) {
   this.pos = pos;
+};
+
+// create from an untyped object with identical property names:
+CSG.Vertex.fromObject = function(obj) {
+  var pos = new CSG.Vector3D(obj.pos);
+  return new CSG.Vertex(pos);
 };
 
 CSG.Vertex.prototype = {
@@ -958,6 +1088,13 @@ CSG.Plane = function(normal, w) {
   this.w = w;
 };
 
+// create from an untyped object with identical property names:
+CSG.Plane.fromObject = function(obj) {
+  var normal = new CSG.Vector3D(obj.normal);
+  var w = parseFloat(obj.w);
+  return new CSG.Plane(normal, w);
+};
+
 // `CSG.Plane.EPSILON` is the tolerance used by `splitPolygon()` to decide if a
 // point is on the plane.
 CSG.Plane.EPSILON = 1e-5;
@@ -965,6 +1102,30 @@ CSG.Plane.EPSILON = 1e-5;
 CSG.Plane.fromVector3Ds = function(a, b, c) {
   var n = b.minus(a).cross(c.minus(a)).unit();
   return new CSG.Plane(n, n.dot(a));
+};
+
+// like fromVector3Ds, but allow the vectors to be on one point or one line
+// in such a case a random plane through the given points is constructed
+CSG.Plane.anyPlaneFromVector3Ds = function(a, b, c) {
+  var v1 = b.minus(a);
+  var v2 = c.minus(a);
+  if(v1.length() < 1e-5)
+  {
+    v1 = v2.randomNonParallelVector();
+  }
+  if(v2.length() < 1e-5)
+  {
+    v2 = v1.randomNonParallelVector();
+  }
+  var normal = v1.cross(v2);
+  if(normal.length() < 1e-5)
+  {
+    // this would mean that v1 == v2.negated()
+    v2 = v1.randomNonParallelVector();
+    normal = v1.cross(v2);
+  }
+  normal = normal.unit();
+  return new CSG.Plane(normal, normal.dot(a));
 };
 
 CSG.Plane.fromPoints = function(a, b, c) {
@@ -1237,6 +1398,16 @@ CSG.Polygon = function(vertices, shared, plane) {
   }
 };
 
+// create from an untyped object with identical property names:
+CSG.Polygon.fromObject = function(obj) {
+  var vertices = obj.vertices.map(function(v) {
+    return CSG.Vertex.fromObject(v);
+  });
+  var shared = null;
+  var plane = CSG.Plane.fromObject(obj.plane);
+  return new CSG.Polygon(vertices, shared, plane);
+};
+
 CSG.Polygon.prototype = {
   // check whether the polygon is convex (it should be, otherwise we will get unexpected results)
   checkIfConvex: function() {
@@ -1360,19 +1531,17 @@ CSG.Polygon.prototype = {
     return new CSG.Polygon(newvertices, this.shared, newplane);
   },
   
-  mirrored: function(plane) {
-    var newvertices = this.vertices.map(function(v) {
-      var newpos = plane.mirrorPoint(v.pos);
-      return new CSG.Vertex(newpos);
-    });
-    newvertices.reverse();
-    return new CSG.Polygon(newvertices, this.shared);
-  },
-  
   // Affine transformation of polygon. Returns a new CSG.Polygon
   transform: function(matrix4x4) {
     var newvertices = this.vertices.map(function(v) { return v.transform(matrix4x4); } );
     var newplane = this.plane.transform(matrix4x4);
+    var scalefactor = matrix4x4.elements[0] * matrix4x4.elements[5] * matrix4x4.elements[10];
+    if(scalefactor < 0)
+    {
+      // the transformation includes mirroring. We need to reverse the vertex order
+      // in order to preserve the inside/outside orientation:
+      newvertices.reverse();
+    }
     return new CSG.Polygon(newvertices, this.shared, newplane);
   },
   
@@ -1896,7 +2065,8 @@ CSG.Matrix4x4.prototype = {
     return new CSG.Matrix4x4(elements);
   },
   
-  // Multiply a CSG.Vector3D (interpreted as 1 row, 3 column) by this matrix 
+  // Right multiply the matrix by a CSG.Vector3D (interpreted as 3 row, 1 column)
+  // (result = M*v)
   // Fourth element is taken as 1
   rightMultiply1x3Vector: function(v) {
     var v0 = v.x;
@@ -1918,7 +2088,31 @@ CSG.Matrix4x4.prototype = {
     return new CSG.Vector3D(x,y,z);       
   },
   
-  // Multiply a CSG.Vector2D (interpreted as 1 row, 2 column) by this matrix 
+  // Multiply a CSG.Vector3D (interpreted as 3 column, 1 row) by this matrix
+  // (result = v*M)
+  // Fourth element is taken as 1
+  leftMultiply1x3Vector: function(v) {
+    var v0 = v.x;
+    var v1 = v.y;
+    var v2 = v.z;
+    var v3 = 1;    
+    var x = v0*this.elements[0] + v1*this.elements[4] + v2*this.elements[8] + v3*this.elements[12];    
+    var y = v0*this.elements[1] + v1*this.elements[5] + v2*this.elements[9] + v3*this.elements[13];    
+    var z = v0*this.elements[2] + v1*this.elements[6] + v2*this.elements[10] + v3*this.elements[14];    
+    var w = v0*this.elements[3] + v1*this.elements[7] + v2*this.elements[11] + v3*this.elements[15];
+    // scale such that fourth element becomes 1:
+    if(w != 1)
+    {
+      var invw=1.0/w;
+      x *= invw;
+      y *= invw;
+      z *= invw;
+    }
+    return new CSG.Vector3D(x,y,z);       
+  },
+  
+  // Right multiply the matrix by a CSG.Vector2D (interpreted as 2 row, 1 column)
+  // (result = M*v)
   // Fourth element is taken as 1
   rightMultiply1x2Vector: function(v) {
     var v0 = v.x;
@@ -1929,6 +2123,29 @@ CSG.Matrix4x4.prototype = {
     var y = v0*this.elements[4] + v1*this.elements[5] + v2*this.elements[6] + v3*this.elements[7];    
     var z = v0*this.elements[8] + v1*this.elements[9] + v2*this.elements[10] + v3*this.elements[11];    
     var w = v0*this.elements[12] + v1*this.elements[13] + v2*this.elements[14] + v3*this.elements[15];
+    // scale such that fourth element becomes 1:
+    if(w != 1)
+    {
+      var invw=1.0/w;
+      x *= invw;
+      y *= invw;
+      z *= invw;
+    }
+    return new CSG.Vector2D(x,y);       
+  },
+
+  // Multiply a CSG.Vector2D (interpreted as 2 column, 1 row) by this matrix
+  // (result = v*M)
+  // Fourth element is taken as 1
+  leftMultiply1x2Vector: function(v) {
+    var v0 = v.x;
+    var v1 = v.y;
+    var v2 = 0;
+    var v3 = 1;    
+    var x = v0*this.elements[0] + v1*this.elements[4] + v2*this.elements[8] + v3*this.elements[12];    
+    var y = v0*this.elements[1] + v1*this.elements[5] + v2*this.elements[9] + v3*this.elements[13];    
+    var z = v0*this.elements[2] + v1*this.elements[6] + v2*this.elements[10] + v3*this.elements[14];    
+    var w = v0*this.elements[3] + v1*this.elements[7] + v2*this.elements[11] + v3*this.elements[15];
     // scale such that fourth element becomes 1:
     if(w != 1)
     {
@@ -1953,8 +2170,8 @@ CSG.Matrix4x4.rotationX = function(degrees) {
   var sin = Math.sin(radians);
   var els = [
     1, 0, 0, 0,
-    0, cos, -sin, 0,
-    0, sin, cos, 0,
+    0, cos, sin, 0,
+    0, -sin, cos, 0,
     0, 0, 0, 1
   ];
   return new CSG.Matrix4x4(els);
@@ -1966,9 +2183,9 @@ CSG.Matrix4x4.rotationY = function(degrees) {
   var cos = Math.cos(radians);
   var sin = Math.sin(radians);
   var els = [
-    cos, 0, sin, 0,
+    cos, 0, -sin, 0,
     0, 1, 0, 0,
-    -sin, 0, cos, 0,
+    sin, 0, cos, 0,
     0, 0, 0, 1
   ];
   return new CSG.Matrix4x4(els);
@@ -1980,8 +2197,8 @@ CSG.Matrix4x4.rotationZ = function(degrees) {
   var cos = Math.cos(radians);
   var sin = Math.sin(radians);
   var els = [
-    cos, -sin, 0, 0,
-    sin, cos, 0, 0,
+    cos, sin, 0, 0,
+    -sin, cos, 0, 0,
     0, 0, 1, 0,
     0, 0, 0, 1
   ];
@@ -1993,10 +2210,25 @@ CSG.Matrix4x4.translation = function(v) {
   // parse as CSG.Vector3D, so we can pass an array or a CSG.Vector3D
   var vec = new CSG.Vector3D(v);
   var els = [
-    1, 0, 0, vec.x,
-    0, 1, 0, vec.y,
-    0, 0, 1, vec.z,
-    0, 0, 0, 1
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    vec.x, vec.y, vec.z, 1
+  ];
+  return new CSG.Matrix4x4(els);
+};
+
+// Create an affine matrix for mirroring into an arbitrary plane:
+CSG.Matrix4x4.mirroring = function(plane) {
+  var nx = plane.normal.x;
+  var ny = plane.normal.y;
+  var nz = plane.normal.z;
+  var w = plane.w;
+  var els = [
+    (1.0-2.0*nx*nx), (-2.0*ny*nx),    (-2.0*nz*nx),    0, 
+    (-2.0*nx*ny),    (1.0-2.0*ny*ny), (-2.0*nz*ny),    0,
+    (-2.0*nx*nz),    (-2.0*ny*nz),    (1.0-2.0*nz*nz), 0, 
+    (-2.0*nx*w),     (-2.0*ny*w),     (-2.0*nz*w),     1  
   ];
   return new CSG.Matrix4x4(els);
 };
@@ -2053,6 +2285,19 @@ CSG.Vector2D = function(x, y) {
   {
     throw new Error("wrong arguments");
   }
+};
+
+CSG.Vector2D.fromAngle = function(radians) {
+  return CSG.Vector2D.fromAngleRadians(radians);
+};
+
+CSG.Vector2D.fromAngleDegrees = function(degrees) {
+  var radians = Math.PI * degrees / 180;
+  return CSG.Vector2D.fromAngleRadians(radians);
+};
+
+CSG.Vector2D.fromAngleRadians = function(radians) {
+  return new CSG.Vector2D(Math.cos(radians), Math.sin(radians));
 };
 
 CSG.Vector2D.prototype = {
@@ -2117,7 +2362,21 @@ CSG.Vector2D.prototype = {
   // Right multiply by a 4x4 matrix (the vector is interpreted as a row vector)
   // Returns a new CSG.Vector2D
   multiply4x4: function(matrix4x4) {
-    return matrix4x4.rightMultiply1x2Vector(this);
+    return matrix4x4.leftMultiply1x2Vector(this);
+  },
+  
+  angle: function() {
+    return this.angleRadians();
+  },
+  
+  angleDegrees: function() {
+    var radians = this.angleRadians();
+    return 180 * radians / Math.PI;
+  },
+  
+  angleRadians: function() {
+    // y=sin, x=cos
+    return Math.atan2(this.y, this.x);
   },
 };
 
@@ -2415,10 +2674,29 @@ CSG.OrthoNormalBasis = function (plane) {
   }
   this.v = rightvector.cross(plane.normal).unit();
   this.u = plane.normal.cross(this.v);
+  this.plane = plane;
   this.planeorigin = plane.normal.times(plane.w);
 };
 
 CSG.OrthoNormalBasis.prototype = {
+  getProjectionMatrix: function() {
+    return new CSG.Matrix4x4([
+      this.u.x, this.v.x, this.plane.normal.x, 0,
+      this.u.y, this.v.y, this.plane.normal.y, 0,
+      this.u.z, this.v.z, this.plane.normal.z, 0,
+      0, 0, -this.plane.w, 1      
+    ]);
+  },
+  
+  getInverseProjectionMatrix: function() {
+    return new CSG.Matrix4x4([
+      this.u.x, this.u.y, this.u.z, 0,
+      this.v.x, this.v.y, this.v.z, 0,
+      this.plane.normal.x, this.plane.normal.y, this.plane.normal.z, this.plane.w,
+      0,0,0,1
+    ]);
+  },
+  
   to2D: function(vec3) {
     return new CSG.Vector2D(vec3.dot(this.u), vec3.dot(this.v));
   },
@@ -3073,3 +3351,497 @@ CSG.staticTag = 1;
 CSG.getTag = function () {
   return CSG.staticTag++;
 };
+
+//////////////////////////////////////
+
+// # Class Properties
+// This class is used to store properties of a solid
+// A property can for example be a CSG.Vertex, a CSG.Plane or a CSG.Line3D
+// Whenever an affine transform is applied to the CSG solid, all its properties are
+// transformed as well.
+// The properties can be stored in a complex nested structure (using arrays and objects)
+CSG.Properties = function() {
+};
+
+CSG.Properties.prototype = {
+  _transform: function(matrix4x4) {
+    var result = new CSG.Properties();
+    CSG.Properties.transformObj(this, result, matrix4x4);
+    return result;
+  },
+  _merge: function(otherproperties) {
+    var result = new CSG.Properties();
+    CSG.Properties.cloneObj(this, result);
+    CSG.Properties.addFrom(result, otherproperties);
+    return result;
+  },
+};
+
+CSG.Properties.transformObj = function(source, result, matrix4x4)
+{
+  for(var propertyname in source)
+  {
+    if(propertyname == "_transform") continue;
+    if(propertyname == "_merge") continue;
+    var propertyvalue = source[propertyname];
+    var transformed = propertyvalue;
+    if(typeof(propertyvalue) == "object")
+    {
+      if( ('transform' in propertyvalue) && (typeof(propertyvalue.transform) == "function") )
+      {
+        transformed = propertyvalue.transform(matrix4x4);
+      }
+      else if(propertyvalue instanceof Array)
+      {
+        transformed = [];
+        CSG.Properties.transformObj(propertyvalue, transformed, matrix4x4);          
+      }
+      else if(propertyvalue instanceof CSG.Properties)
+      {
+        transformed = new CSG.Properties();
+        CSG.Properties.transformObj(propertyvalue, transformed, matrix4x4);          
+      }
+    }
+    result[propertyname] = transformed;
+  }
+};
+
+CSG.Properties.cloneObj = function(source, result)
+{
+  for(var propertyname in source)
+  {
+    if(propertyname == "_transform") continue;
+    if(propertyname == "_merge") continue;
+    var propertyvalue = source[propertyname];
+    var cloned = propertyvalue;
+    if(typeof(propertyvalue) == "object")
+    {
+      if(propertyvalue instanceof Array)
+      {
+        cloned = [];
+        for(var i=0; i < propertyvalue.length; i++)
+        {
+          cloned.push(propertyvalue[i]);
+        }
+      }
+      else if(propertyvalue instanceof CSG.Properties)
+      {
+        cloned = new CSG.Properties();
+        CSG.Properties.cloneObj(propertyvalue, cloned);        
+      }
+    }
+    result[propertyname] = cloned;  
+  }
+};
+
+CSG.Properties.addFrom = function(result, otherproperties)
+{
+  for(var propertyname in otherproperties)
+  {
+    if(propertyname == "_transform") continue;
+    if(propertyname == "_merge") continue;
+    if( (propertyname in result) 
+      && (typeof(result[propertyname]) == "object")
+      && (result[propertyname] instanceof CSG.Properties)
+      && (typeof(otherproperties[propertyname]) == "object")
+      && (otherproperties[propertyname] instanceof CSG.Properties) )
+    {
+      CSG.Properties.addFrom(result[propertyname], otherproperties[propertyname]);
+    }
+    else if(!(propertyname in result))
+    {
+      result[propertyname] = otherproperties[propertyname];
+    }
+  }
+};
+
+//////////////////////////////////////
+
+// # class Connector
+// A connector allows to attach two objects at predefined positions
+// For example a servo motor and a servo horn:
+// Both can have a Connector called 'shaft'
+// The horn can be moved and rotated such that the two connectors match
+// and the horn is attached to the servo motor at the proper position. 
+// Connectors are stored in the properties of a CSG solid so they are
+// ge the same transformations applied as the solid
+
+CSG.Connector = function(point, axisvector, normalvector) {
+  this.point = new CSG.Vector3D(point);
+  this.axisvector = new CSG.Vector3D(axisvector);
+  this.normalvector = new CSG.Vector3D(normalvector);
+};
+
+CSG.Connector.prototype = {
+  normalized: function() {
+    var axisvector = this.axisvector.unit();
+    // make the normal vector truly normal:
+    var n = this.normalvector.cross(axisvector).unit();
+    var normalvector = axisvector.cross(n);
+    return new CSG.Connector(this.point, axisvector, normalvector);
+  },
+  
+  transform: function(matrix4x4) {
+    var point = this.point.multiply4x4(matrix4x4);
+    var axisvector = this.point.plus(this.axisvector).multiply4x4(matrix4x4).minus(point);
+    var normalvector = this.point.plus(this.normalvector).multiply4x4(matrix4x4).minus(point);
+    return new CSG.Connector(point, axisvector, normalvector);
+  },
+  
+  // Get the transformation matrix to connect this Connector to another connector
+  //   other: a CSG.Connector to which this connector should be connected
+  //   mirror: false: the 'axis' vectors of the connectors should point in the same direction
+  //           true: the 'axis' vectors of the connectors should point in opposite direction
+  //   normalrotation: degrees of rotation between the 'normal' vectors of the two
+  //                   connectors
+  getTransformationTo: function(other, mirror, normalrotation) {
+    mirror = mirror? true:false;
+    normalrotation = normalrotation? Number(normalrotation):0;
+    var us = this.normalized();
+    other = other.normalized();
+    // shift to the origin:
+    var transformation = CSG.Matrix4x4.translation(this.point.negated());
+    // construct the plane crossing through the origin and the two axes:
+    var axesplane = CSG.Plane.anyPlaneFromVector3Ds(
+      new CSG.Vector3D(0,0,0),
+      us.axisvector,
+      other.axisvector
+    );
+    var axesbasis = new CSG.OrthoNormalBasis(axesplane);
+    var angle1 = axesbasis.to2D(us.axisvector).angle();    
+    var angle2 = axesbasis.to2D(other.axisvector).angle(); 
+    var rotation = 180.0 * (angle2 - angle1) / Math.PI;
+    if(mirror) rotation += 180.0;
+    transformation = transformation.multiply(axesbasis.getProjectionMatrix());
+    transformation = transformation.multiply(CSG.Matrix4x4.rotationZ(rotation));
+    transformation = transformation.multiply(axesbasis.getInverseProjectionMatrix());
+    var usAxesAligned = us.transform(transformation);
+    // Now we have done the transformation for aligning the axes.
+    // We still need to align the normals:
+    var normalsplane = CSG.Plane.fromNormalAndPoint(other.axisvector, new CSG.Vector3D(0,0,0));
+    var normalsbasis = new CSG.OrthoNormalBasis(normalsplane);
+    angle1 = normalsbasis.to2D(usAxesAligned.normalvector).angle();    
+    angle2 = normalsbasis.to2D(other.normalvector).angle(); 
+    rotation = 180.0 * (angle2 - angle1) / Math.PI;
+    rotation += normalrotation;
+    transformation = transformation.multiply(normalsbasis.getProjectionMatrix());
+    transformation = transformation.multiply(CSG.Matrix4x4.rotationZ(rotation));
+    transformation = transformation.multiply(normalsbasis.getInverseProjectionMatrix());
+    // and translate to the destination point:
+    transformation = transformation.multiply(CSG.Matrix4x4.translation(other.point));
+    var usAligned = us.transform(transformation);
+    return transformation;       
+  },  
+};
+
+
+//////////////////////////////////////
+
+// # Class Path2D
+
+CSG.Path2D = function(points, closed) {
+  closed = !!closed;
+  points = points || [];
+  // re-parse the points into CSG.Vector2D
+  // and remove any duplicate points
+  var prevpoint = null;
+  if(closed && (points.length > 0))
+  {
+    prevpoint = new CSG.Vector2D(points[points.length-1]);
+  }
+  var newpoints = [];
+  points.map(function(point) {
+    point = new CSG.Vector2D(point); 
+    var skip = false;
+    if(prevpoint !== null)
+    {
+      var distance = point.distanceTo(prevpoint);
+      skip = distance < 1e-5;
+    }
+    if(!skip) newpoints.push(point);
+    prevpoint = point;
+  });
+  this.points = newpoints;
+  this.closed = closed;
+};
+
+/*
+Construct a (part of a) circle. Parameters:
+  options.center: the center point of the arc (CSG.Vector2D or array [x,y])
+  options.radius: the circle radius (float)
+  options.startangle: the starting angle of the arc, in degrees
+    0 degrees corresponds to [1,0]
+    90 degrees to [0,1]
+    and so on
+  options.endangle: the ending angle of the arc, in degrees
+  options.resolution: number of points per 360 degree of rotation
+  options.maketangent: adds two extra tiny line segments at both ends of the circle
+    this ensures that the gradients at the edges are tangent to the circle
+Returns a CSG.Path2D. The path is not closed (even if it is a 360 degree arc).
+close() the resultin path if you want to create a true circle.    
+*/
+CSG.Path2D.arc = function(options) {
+  var center = CSG.parseOptionAs2DVector(options, "center", 0);
+  var radius = CSG.parseOptionAsFloat(options, "radius", 1);
+  var startangle = CSG.parseOptionAsFloat(options, "startangle", 0);
+  var endangle = CSG.parseOptionAsFloat(options, "endangle", 360);
+  var resolution = CSG.parseOptionAsFloat(options, "resolution", 16);
+  var maketangent =CSG.parseOptionAsBool(options, "maketangent", false);
+  // no need to make multiple turns:
+  while(endangle - startangle >= 720)
+  {
+    endangle -= 360;
+  }
+  while(endangle - startangle <= -720)
+  {
+    endangle += 360;
+  }
+  var points = [];
+  var absangledif = Math.abs(endangle-startangle);
+  if(absangledif < 1e-5)
+  {
+    var point = CSG.Vector2D.fromAngle(startangle / 180.0 * Math.PI).times(radius);
+    points.push(point.plus(center));
+  }
+  else
+  {
+    var numsteps = Math.floor(resolution * absangledif / 360) + 1;
+    var edgestepsize = numsteps * 0.5 / absangledif; // step size for half a degree
+    if(edgestepsize > 0.25) edgestepsize = 0.25;
+    var numsteps_mod = maketangent? (numsteps+2):numsteps;
+    for(var i = 0; i <= numsteps_mod; i++)
+    {
+      var step = i;
+      if(maketangent)
+      {
+        step = (i-1)*(numsteps-2*edgestepsize)/numsteps+edgestepsize;
+        if(step < 0) step = 0;
+        if(step > numsteps) step = numsteps;
+      }
+      var angle = startangle + step * (endangle - startangle) / numsteps;
+      var point = CSG.Vector2D.fromAngle(angle / 180.0 * Math.PI).times(radius);
+      points.push(point.plus(center));
+    }
+  }
+  return new CSG.Path2D(points, false);
+};
+
+CSG.Path2D.prototype = {
+  concat: function(otherpath) {
+    if(this.closed || otherpath.closed)
+    {
+      throw new Error("Paths must not be closed");
+    }
+    var newpoints = this.points.concat(otherpath.points);
+    return new CSG.Path2D(newpoints);
+  },
+  
+  appendPoint: function(point) {
+    if(this.closed)
+    {
+      throw new Error("Paths must not be closed");
+    }
+    var newpoints = this.points.concat([point]);
+    return new CSG.Path2D(newpoints);
+  },
+  
+  close: function() {
+    return new CSG.Path2D(this.points, true);
+  },
+
+  // Extrude the path by following it with a rectangle (upright, perpendicular to the path direction)
+  // Returns a CSG solid
+  //   width: width of the extrusion, in the z=0 plane
+  //   height: height of the extrusion in the z direction
+  //   resolution: number of segments per 360 degrees for the curve in a corner
+  //   roundEnds: if true, the ends of the polygon will be rounded, otherwise they will be flat
+  rectangularExtrude: function(width, height, resolution, roundEnds) {
+    var polygon2ds = this.toPolygon2Ds(width/2, resolution, roundEnds);
+    var result = new CSG();
+    var offsetvector = [0, 0, height];
+    polygon2ds.map(function(polygon) {
+      var csg = polygon.extrude({offset: offsetvector});
+      result = result.union(csg);
+    });
+    return result;    
+  },
+  
+  // expand the path (which is just a line with no width) to a 2D shape with a certain path width
+  // Returns an array of CSG.Polygon2D. Note that those polygons may overlap.
+  // pathradius: radius of the path, i.e. half of the diameter of the path
+  // resolution: number of segments per 360 degrees for the curve in a corner
+  // roundEnds: if true, the ends of the polygon will be rounded, otherwise they will be flat
+  toPolygon2Ds: function(pathradius, resolution, roundEnds) {
+    resolution = resolution || 16;
+    roundEnds = !!roundEnds;
+    if(this.closed) roundEnds = false; // a closed curve has no ends
+    if(resolution < 4) resolution = 4;
+    var polygons = [];
+    if(this.points.length >= 1)
+    {
+      for(var i = 0; i < this.points.length; i++)
+      {
+        var previ = i-1;
+        if(previ < 0)
+        {
+          if(this.closed)
+          {
+            previ += this.points.length;
+          }
+          else
+          {
+            if(this.points.length >= 2)
+            {
+              previ = i+1;
+            }
+            else
+            {
+              previ = i;
+            }
+          }
+        }           
+        var prevpoint = this.points[previ];
+        var point = this.points[i];
+        var direction;
+        if(this.points.length >= 2)
+        {
+          direction = point.minus(prevpoint).unit();
+        }
+        else
+        {
+          direction = new CSG.Vector2D(1,0);  // arbitrary
+        }
+        var normal = direction.normal().times(pathradius);        
+        if(this.points.length >= 2)
+        {
+          if( (this.closed) || (i > 0) )
+          {
+            var segpoints = [
+              prevpoint.minus(normal),
+              prevpoint.plus(normal),
+              point.plus(normal),
+              point.minus(normal)
+            ];
+            var polygon = new CSG.Polygon2D(segpoints, null);
+            polygons.push(polygon);
+          }
+        }
+        
+        // make the curved parts between segments and optionally the rounded end:
+        if(roundEnds || this.closed || ((i > 0)&&(i+1 < this.points.length)))
+        {
+          var nexti = i+1;
+          if(nexti >= this.points.length)
+          {
+            if(this.closed) 
+            {
+              nexti = 0;
+            }
+            else
+            {
+              // at the end: go backwards, this will create a rounded end
+              if(this.points.length >= 2)
+              {
+                nexti = i-1;
+              }
+              else
+              {
+                nexti = i;
+              }
+            }
+          }
+          var nextpoint = this.points[nexti];
+          var nextdirection;
+          if(this.points.length >= 2)
+          {
+            nextdirection = nextpoint.minus(point).unit();
+          }
+          else
+          {
+            nextdirection = new CSG.Vector2D(1,0);  // arbitrary
+          }
+          var nextnormal = nextdirection.normal().times(pathradius);        
+          var directionangle = direction.angleDegrees();
+          var nextangle = nextdirection.angleDegrees();
+          if(nextangle > directionangle+180)
+          {
+            nextangle -= 360;
+          }
+          else if(nextangle <= directionangle-180)
+          {
+            nextangle += 360;
+          }
+          if(this.points.length == 1)
+          {
+            nextangle += 360;
+          }
+           
+          
+          var diffangle = nextangle - directionangle;
+          var absdiffangle = Math.abs(diffangle); 
+          if(absdiffangle > 1e-5)
+          {
+            var numsteps = Math.floor(resolution * absdiffangle / 360) + 1;
+            var prevcornerpoint = null;
+            for(var step = 0; step <= numsteps; step++)
+            {
+              var angle = directionangle + step*diffangle/numsteps;
+              if(diffangle > 0)
+              {
+                angle -= 90;
+              }
+              else
+              {
+                angle += 90;
+              }
+              var cornerpoint;
+              if(step == 0)
+              {
+                // first point of curve. To prevent rounding errors, use the exact point
+                if(diffangle > 0)
+                {
+                  cornerpoint = normal;
+                }
+                else
+                {
+                  cornerpoint = normal.negated();
+                }
+              }
+              else if(step == numsteps)
+              {
+                // last point of curve. To prevent rounding errors, use the exact point
+                if(diffangle > 0)
+                {
+                  cornerpoint = nextnormal;
+                }
+                else
+                {
+                  cornerpoint = nextnormal.negated();
+                }
+              }
+              else
+              {
+                cornerpoint = CSG.Vector2D.fromAngleDegrees(angle).times(pathradius);
+              }
+              cornerpoint = cornerpoint.plus(point);
+              if(step > 0)
+              {
+                var polygon = new CSG.Polygon2D([point, prevcornerpoint, cornerpoint], null);
+                polygons.push(polygon);
+              }
+              prevcornerpoint = cornerpoint;
+            } // for step
+          } // if(absdiffangle > 1e-5)
+        } // if( (i+1 < this.points.length) || roundEnds || this.closed)
+      } // for i
+    }     
+    return polygons;
+  },
+  
+  transform: function(matrix4x4) {
+    var newpoints = this.points.map(function(point) {
+      return point.multiply4x4(matrix4x4);
+    });
+    return new CSG.Path2D(newpoints, this.closed);
+  },  
+};                                 
