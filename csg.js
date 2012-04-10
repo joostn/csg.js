@@ -692,37 +692,26 @@ CSG.cylinder = function(options) {
   var start = new CSG.Vertex(s);
   var end = new CSG.Vertex(e);
   var polygons = [];
-  function point(stack, slice, normalBlend, radius) {
+  function point(stack, slice, radius) {
     var angle = slice * Math.PI * 2;
     var out = axisX.times(Math.cos(angle)).plus(axisY.times(Math.sin(angle)));
     var pos = s.plus(ray.times(stack)).plus(out.times(radius));
-    var normal = out.times(1 - Math.abs(normalBlend)).plus(axisZ.times(normalBlend));
     return new CSG.Vertex(pos);
   }
   for (var i = 0; i < slices; i++) {
     var t0 = i / slices, t1 = (i + 1) / slices;
     if(rTop == rBottom){
-      //p->insert_vertex(circle1[i].x, circle1[i].y, z1);
-			//p->insert_vertex(circle2[i].x, circle2[i].y, z2);
-			//p->insert_vertex(circle2[j].x, circle2[j].y, z2);
-			//p->insert_vertex(circle1[j].x, circle1[j].y, z1);
-      polygons.push(new CSG.Polygon([start, point(0, t0, -1, r), point(0, t1, -1, r)]));
-      polygons.push(new CSG.Polygon([point(0, t1, 0, r), point(0, t0, 0, r), point(1, t0, 0, r), point(1, t1, 0, r)]));
-      polygons.push(new CSG.Polygon([end, point(1, t1, 1, r), point(1, t0, 1, r)]));
+      polygons.push(new CSG.Polygon([start, point(0, t0, r), point(0, t1, r)]));
+      polygons.push(new CSG.Polygon([point(0, t1, r), point(0, t0, r), point(1, t0, r), point(1, t1, r)]));
+      polygons.push(new CSG.Polygon([end, point(1, t1, r), point(1, t0, r)]));
     } else {
       if (rBottom > 0){
-			  //p->insert_vertex(circle1[i].x, circle1[i].y, z1);
-				//p->insert_vertex(circle2[i].x, circle2[i].y, z2);
-				//p->insert_vertex(circle1[j].x, circle1[j].y, z1);
-        polygons.push(new CSG.Polygon([start, point(0, t0, -1, rBottom), point(0, t1, -1, rBottom)]));
-        polygons.push(new CSG.Polygon([point(1, t1, 0, rTop), point(0, t0, 0, rBottom), point(0, t1, 0, rBottom)]));
+        polygons.push(new CSG.Polygon([start, point(0, t0, rBottom), point(0, t1, rBottom)]));
+        polygons.push(new CSG.Polygon([point(0, t0, rBottom), point(1, t0, rTop), point(0, t1, rBottom)]));
       }
       if (rTop > 0){
-        //p->insert_vertex(circle2[i].x, circle2[i].y, z2);
-				//p->insert_vertex(circle2[j].x, circle2[j].y, z2);
-				//p->insert_vertex(circle1[j].x, circle1[j].y, z1);
-        polygons.push(new CSG.Polygon([end, point(1, t0, -1, rTop), point(1, t1, -1, rTop)]));
-        polygons.push(new CSG.Polygon([point(1, t0, 0, rTop), point(1, t1, 0, rTop), point(0, t1, 0, rBottom)]));
+        polygons.push(new CSG.Polygon([end, point(1, t1, rTop), point(1, t0, rTop)]));
+        polygons.push(new CSG.Polygon([point(1, t0, rTop), point(1, t1, rTop), point(0, t1, rBottom)]));
       }
     }
   }
