@@ -682,6 +682,8 @@ CSG.cylinder = function(options) {
   var s = CSG.parseOptionAs3DVector(options, "start", [0, -1, 0]);
   var e = CSG.parseOptionAs3DVector(options, "end", [0, 1, 0]);
   var r = CSG.parseOptionAsFloat(options, "radius", 1);
+  var rTop = CSG.parseOptionAsFloat(options, "radiusTop", r);
+  var rBottom = CSG.parseOptionAsFloat(options, "radiusBottom", r);
   var slices = CSG.parseOptionAsFloat(options, "resolution", 12);
   var ray = e.minus(s);
   var axisZ = ray.unit(), isY = (Math.abs(axisZ.y) > 0.5);
@@ -690,18 +692,28 @@ CSG.cylinder = function(options) {
   var start = new CSG.Vertex(s);
   var end = new CSG.Vertex(e);
   var polygons = [];
-  function point(stack, slice, normalBlend) {
+  function point(stack, slice, radius) {
     var angle = slice * Math.PI * 2;
     var out = axisX.times(Math.cos(angle)).plus(axisY.times(Math.sin(angle)));
-    var pos = s.plus(ray.times(stack)).plus(out.times(r));
-    var normal = out.times(1 - Math.abs(normalBlend)).plus(axisZ.times(normalBlend));
+    var pos = s.plus(ray.times(stack)).plus(out.times(radius));
     return new CSG.Vertex(pos);
   }
   for (var i = 0; i < slices; i++) {
     var t0 = i / slices, t1 = (i + 1) / slices;
-    polygons.push(new CSG.Polygon([start, point(0, t0, -1), point(0, t1, -1)]));
-    polygons.push(new CSG.Polygon([point(0, t1, 0), point(0, t0, 0), point(1, t0, 0), point(1, t1, 0)]));
-    polygons.push(new CSG.Polygon([end, point(1, t1, 1), point(1, t0, 1)]));
+    if(rTop == rBottom){
+      polygons.push(new CSG.Polygon([start, point(0, t0, r), point(0, t1, r)]));
+      polygons.push(new CSG.Polygon([point(0, t1, r), point(0, t0, r), point(1, t0, r), point(1, t1, r)]));
+      polygons.push(new CSG.Polygon([end, point(1, t1, r), point(1, t0, r)]));
+    } else {
+      if (rBottom > 0){
+        polygons.push(new CSG.Polygon([start, point(0, t0, rBottom), point(0, t1, rBottom)]));
+        polygons.push(new CSG.Polygon([point(0, t0, rBottom), point(1, t0, rTop), point(0, t1, rBottom)]));
+      }
+      if (rTop > 0){
+        polygons.push(new CSG.Polygon([end, point(1, t1, rTop), point(1, t0, rTop)]));
+        polygons.push(new CSG.Polygon([point(1, t0, rTop), point(1, t1, rTop), point(0, t1, rBottom)]));
+      }
+    }
   }
   var result = CSG.fromPolygons(polygons);  
   result.properties.cylinder = new CSG.Properties();
